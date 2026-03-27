@@ -13,6 +13,7 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 SESSION_EDIT_PREFIX = "edit_deg_"
 SESSION_REZIM_PREFIX = "rezim_deg_"
 SESSION_KOMISE_PREFIX = "komise_deg_"
+SESSION_EDIT_ROW_PREFIX = "edit_row_deg_"
 _KOMISE_VELIKOST = 30
 
 _KOMISE_EXTRA_COLS = (
@@ -64,6 +65,12 @@ def init_db():
     exist_deg = {row[1] for row in cur.fetchall()}
     if "pocet_komisi" not in exist_deg:
         conn.execute("ALTER TABLE degustace ADD COLUMN pocet_komisi INTEGER")
+    if "katalog_top_x" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN katalog_top_x INTEGER")
+    if "katalog_format" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN katalog_format TEXT")
+    if "katalog_font_pt" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN katalog_font_pt INTEGER")
 
     cur = conn.execute("PRAGMA table_info(vzorky)")
     exist = {row[1] for row in cur.fetchall()}
@@ -245,7 +252,8 @@ def _vzorek_import_klic(nazev, odruda, privlastek, rocnik):
 
 def import_vzorky_z_textu(text, degustace_id):
     """
-    Importuje vzorky z textu (tabulka s hlavičkou).
+    Importuje vzorky z textu (tabulka s hlavičkou v 1. řádku).
+    Názvy hlaviček se ignorují, rozhoduje jen pořadí sloupců.
     Číslo vzorku z CSV se ignoruje — přiděluje se další volné v degustaci.
     Duplicita podle (Jméno, Odrůda, Přívlastek, Rok) vůči DB i v rámci souboru → řádek přeskočen.
     Vrací slovník: ok, imported, případně error, nebo skipped (seznam stručných důvodů).
@@ -259,9 +267,11 @@ def import_vzorky_z_textu(text, degustace_id):
     f.seek(0)
     delim = _detect_delimiter(first)
 
-    reader = csv.DictReader(f, delimiter=delim)
-    if not reader.fieldnames:
-        return {"ok": False, "error": "V souboru chybí hlavička sloupců."}
+    reader = csv.reader(f, delimiter=delim)
+    try:
+        next(reader)  # Hlavička je povinná, ale její názvy ignorujeme.
+    except StopIteration:
+        return {"ok": False, "error": "Soubor je prázdný."}
 
     conn = get_connection()
     imported = 0
@@ -281,12 +291,14 @@ def import_vzorky_z_textu(text, degustace_id):
         známé_klíče = {_vzorek_import_klic(r["nazev"], r["odruda"], r["privlastek"], r["rocnik"]) for r in existující}
 
         for row in reader:
-            nazev = (row.get("Jméno") or "").strip()
-            adresa = (row.get("Adresa") or "").strip()
-            odruda = (row.get("Odrůda") or "").strip()
-            privlastek = (row.get("Přívlastek") or "").strip()
-            rocnik = (row.get("Rok") or "").strip()
-            body_raw = (row.get("Body") or "").strip()
+            if not row:
+                continue
+            nazev = (row[1] if len(row) > 1 else "").strip()
+            adresa = (row[2] if len(row) > 2 else "").strip()
+            odruda = (row[3] if len(row) > 3 else "").strip()
+            privlastek = (row[4] if len(row) > 4 else "").strip()
+            rocnik = (row[5] if len(row) > 5 else "").strip()
+            body_raw = (row[6] if len(row) > 6 else "").strip()
 
             if not nazev:
                 continue
@@ -334,7 +346,7 @@ def import_vzorky_z_textu(text, degustace_id):
     if imported == 0 and not skipped:
         return {
             "ok": False,
-            "error": "Nepodařilo se naimportovat žádný řádek. Zkontrolujte sloupce (Jméno, Odrůda, …) a oddělovače.",
+            "error": "Nepodařilo se naimportovat žádný řádek. Zkontrolujte pořadí sloupců a oddělovače.",
         }
 
     out = {"ok": True, "imported": imported, "skipped": skipped}
@@ -481,15 +493,7 @@ def home():
         action = request.form.get("action")
 
         if action == "nova_degustace":
-            pocet_raw = request.form.get("pocet_komisi") or "3"
-            try:
-                pocet_komisi = int(pocet_raw)
-            except ValueError:
-                pocet_komisi = 3
-            if pocet_komisi < 1:
-                pocet_komisi = 1
-            if pocet_komisi > 10:
-                pocet_komisi = 10
+            pocet_komisi = 3
             conn.execute(
                 "INSERT INTO degustace (nazev, datum, pocet_komisi) VALUES (?, ?, ?)",
                 (request.form["nazev"], request.form["datum"], pocet_komisi)
@@ -500,7 +504,12 @@ def home():
 
         elif action == "vyber":
             conn.close()
-            return redirect(f"/degustace/{request.form['degustace_id']}")
+            deg_id = str(request.form["degustace_id"])
+            session[SESSION_REZIM_PREFIX + deg_id] = "seznam"
+            session[SESSION_EDIT_PREFIX + deg_id] = False
+            session[SESSION_KOMISE_PREFIX + deg_id] = 1
+            session.modified = True
+            return redirect(f"/degustace/{deg_id}")
 
     degustace = conn.execute(
         "SELECT * FROM degustace ORDER BY datum DESC, id DESC"
@@ -546,7 +555,7 @@ def home():
         </style>
     </head>
     <body>
-        <h1>Degustace vín</h1>
+        <h1>Degustace vín - správa a vyhodnocení bodovaných degustací</h1>
 
         <div class="box">
             <h2>Nová degustace</h2>
@@ -559,10 +568,6 @@ def home():
                 <div>
                     Datum<br>
                     <input type="date" name="datum" required>
-                </div>
-                <div>
-                    Počet komisí (1–10)<br>
-                    <input type="number" name="pocet_komisi" min="1" max="10" value="3" style="width: 90px;">
                 </div>
                 <div>
                     <button type="submit">Vytvořit degustaci</button>
@@ -622,7 +627,7 @@ def detail(id):
 
         if action == "set_rezim":
             r = request.form.get("rezim") or "seznam"
-            if r not in ("seznam", "komise", "nastaveni"):
+            if r not in ("seznam", "komise", "nastaveni", "katalog"):
                 r = "seznam"
             session[SESSION_REZIM_PREFIX + str(id)] = r
             if r == "komise" and session.get(SESSION_EDIT_PREFIX + str(id), False):
@@ -665,6 +670,53 @@ def detail(id):
             conn.close()
             return redirect(red)
 
+        if action == "set_katalog_nastaveni":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            raw_top = (request.form.get("katalog_top_x") or "").strip()
+            if raw_top:
+                try:
+                    top_x = int(raw_top)
+                except ValueError:
+                    top_x = 15
+                top_x = max(1, min(200, top_x))
+            else:
+                top_x = 15
+            fmt = (request.form.get("katalog_format") or "A4").strip().upper()
+            if fmt not in ("A4", "A5"):
+                fmt = "A4"
+            raw_font = (request.form.get("katalog_font_pt") or "").strip()
+            if raw_font:
+                try:
+                    font_pt = int(raw_font)
+                except ValueError:
+                    font_pt = 8
+                font_pt = max(6, min(10, font_pt))
+            else:
+                font_pt = 8
+            conn.execute(
+                "UPDATE degustace SET katalog_top_x = ?, katalog_format = ?, katalog_font_pt = ? WHERE id = ?",
+                (top_x, fmt, font_pt, id),
+            )
+            conn.commit()
+            flash("Nastavení katalogu bylo uloženo.", "success")
+            conn.close()
+            return redirect(red)
+
+        if action == "smaz_vse_vzorky":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            conn.execute(
+                "DELETE FROM vzorky WHERE degustace_id = ?",
+                (id,),
+            )
+            conn.commit()
+            flash("Všechny vzorky degustace byly smazány.", "success")
+            conn.close()
+            return redirect(red)
+
         if action == "set_komise":
             k = request.form.get("komise") or "1"
             edit_now = session.get(SESSION_EDIT_PREFIX + str(id), False)
@@ -675,6 +727,56 @@ def detail(id):
                     session[SESSION_KOMISE_PREFIX + str(id)] = max(1, int(k))
                 except ValueError:
                     session[SESSION_KOMISE_PREFIX + str(id)] = 1
+            session.modified = True
+            conn.close()
+            return redirect(red)
+
+        if action == "edit_row":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "seznam":
+                conn.close()
+                return redirect(red)
+            try:
+                vid = int(request.form.get("vzorek_id") or "0")
+            except ValueError:
+                vid = 0
+            key_row = SESSION_EDIT_ROW_PREFIX + str(id)
+            session[key_row] = vid if vid > 0 else None
+            session.modified = True
+            conn.close()
+            return redirect(red)
+
+        if action == "edit_row_cancel":
+            key_row = SESSION_EDIT_ROW_PREFIX + str(id)
+            session.pop(key_row, None)
+            session.modified = True
+            conn.close()
+            return redirect(red)
+
+        if action == "update_vzorek":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "seznam":
+                conn.close()
+                return redirect(red)
+            try:
+                vid = int(request.form.get("vzorek_id") or "0")
+            except ValueError:
+                vid = 0
+            if vid > 0:
+                nazev = (request.form.get("nazev") or "").strip()
+                adresa = (request.form.get("adresa") or "").strip()
+                odruda = (request.form.get("odruda") or "").strip()
+                privlastek = (request.form.get("privlastek") or "").strip()
+                rocnik = (request.form.get("rocnik") or "").strip()
+                conn.execute(
+                    """
+                    UPDATE vzorky
+                    SET nazev = ?, adresa = ?, odruda = ?, privlastek = ?, rocnik = ?
+                    WHERE id = ? AND degustace_id = ?
+                    """,
+                    (nazev, adresa, odruda, privlastek, rocnik, vid, id),
+                )
+                conn.commit()
+            key_row = SESSION_EDIT_ROW_PREFIX + str(id)
+            session.pop(key_row, None)
             session.modified = True
             conn.close()
             return redirect(red)
@@ -868,11 +970,20 @@ def detail(id):
 
     edit_mode = session.get(SESSION_EDIT_PREFIX + str(id), False)
     rezim = session.get(SESSION_REZIM_PREFIX + str(id), "seznam")
-    if rezim not in ("seznam", "komise", "nastaveni"):
+    if rezim not in ("seznam", "komise", "nastaveni", "katalog"):
         rezim = "seznam"
 
     vzorky_o = list(vzorky)
     n_kom = pocet_komisi
+
+    edit_row_id = None
+    if rezim == "seznam" and edit_mode:
+        key_row = SESSION_EDIT_ROW_PREFIX + str(id)
+        raw_er = session.get(key_row)
+        try:
+            edit_row_id = int(raw_er) if raw_er is not None else None
+        except (TypeError, ValueError):
+            edit_row_id = None
 
     raw_k = session.get(SESSION_KOMISE_PREFIX + str(id), 1)
     if raw_k in (-1, "-1", "vse"):
@@ -909,6 +1020,14 @@ def detail(id):
                 vzorky_komise_tab = [v for v in vzorky_o if int(v["komise_cislo"] or 0) == komise_sel]
 
     flash_html = _html_flash_zprávy()
+    katalog_warning_html = ""
+    if rezim == "katalog" and not any(v["body"] is not None for v in vzorky_o):
+        katalog_warning_html = (
+            '<div style="max-width:1280px;margin:0 auto 10px;padding:0 20px;">'
+            '<div style="padding:10px 14px;border-radius:6px;border:1px solid #8b1538;background:#fde8ec;color:#222;">'
+            'V katalogu zatím není pořadí, protože u vzorků nejsou zadané body.'
+            '</div></div>'
+        )
     ma_vzorky = len(vzorky_o) > 0
 
     ph = _preserve_hidden(sort_key, sort_dir, q_raw)
@@ -926,12 +1045,30 @@ def detail(id):
     datum_cz = format_datum_cz(degustace["datum"])
     if rezim == "seznam":
         title_rezim_suffix = "Seznam vzorků"
+    elif rezim == "katalog":
+        title_rezim_suffix = "Katalog"
     elif rezim == "nastaveni":
         title_rezim_suffix = "Nastavení"
     else:
         title_rezim_suffix = (
             "Komise · Vše" if komise_sel == -1 else f"Komise · č. {komise_sel}"
         )
+
+    katalog_top_x = degustace["katalog_top_x"]
+    try:
+        katalog_top_x = int(katalog_top_x) if katalog_top_x is not None else 15
+    except (TypeError, ValueError):
+        katalog_top_x = 15
+    katalog_top_x = max(1, min(200, katalog_top_x))
+    katalog_format = (degustace["katalog_format"] or "A4").strip().upper()
+    if katalog_format not in ("A4", "A5"):
+        katalog_format = "A4"
+    katalog_font_pt = degustace["katalog_font_pt"]
+    try:
+        katalog_font_pt = int(katalog_font_pt) if katalog_font_pt is not None else 8
+    except (TypeError, ValueError):
+        katalog_font_pt = 8
+    katalog_font_pt = max(6, min(10, katalog_font_pt))
 
     tisk_html = ""
     komise_select_html = ""
@@ -942,6 +1079,7 @@ def detail(id):
             <div class="tisk-panel-wrap">
                 <button type="button" class="btn btn-primary btn-sm" id="btn-tisk-toggle">Tisk pro komise</button>
                 <div id="tisk-panel" class="tisk-panel">
+                    <button type="button" class="tisk-panel-close" id="btn-tisk-close" aria-label="Zavřít">×</button>
                     <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);">Rozdělení vzorků do komisí už existuje.</p>
                     <div class="tisk-panel-actions">
                         <a class="btn btn-primary btn-sm" href="/tisk/{id}?mode=use" target="_blank">Použít existující rozdělení</a>
@@ -975,6 +1113,10 @@ def detail(id):
                 <select name="komise" id="sel-komise" class="select-komise" onchange="this.form.submit()">{opts_joined}</select>
             </form>
         """
+
+    katalog_tisk_html = ""
+    if rezim == "katalog":
+        katalog_tisk_html = f'<a class="btn btn-primary btn-sm" href="/katalog_tisk/{id}" target="_blank">Tisk katalogu</a>'
 
     seznam_tools_row_html = ""
     if rezim == "seznam":
@@ -1016,9 +1158,10 @@ def detail(id):
                     <div id="help-panel" class="help-panel">
                         <p><strong>Filtrování</strong> (režim Zobrazení): slova oddělte mezerou. Řádek musí obsahovat
                         <em>všechna</em> slova kdykoli v řádku (AND).</p>
-                        <p><strong>Import:</strong> tabulka z Excelu (tabulátory), CSV nebo středníky. Sloupce: č.v. (ignoruje se),
-                        Jméno, Adresa, Odrůda, Přívlastek, Rok, Body (volitelně). Číslo vzorku vždy přidělí aplikace. Stejná
-                        kombinace Jméno + Odrůda + Přívlastek + Rok jako u již uloženého vzorku nebo dvakrát v souboru → řádek se přeskočí.</p>
+                        <p><strong>Import:</strong> tabulka z Excelu (tabulátory), CSV nebo středníky. <strong>Názvy hlaviček se ignorují</strong>,
+                        rozhoduje jen pořadí sloupců: 1) č.v. (ignoruje se), 2) Jméno, 3) Adresa, 4) Odrůda, 5) Přívlastek,
+                        6) Rok, 7) Body (volitelně). Číslo vzorku vždy přidělí aplikace. Stejná kombinace Jméno + Odrůda +
+                        Přívlastek + Rok jako u již uloženého vzorku nebo dvakrát v souboru → řádek se přeskočí.</p>
                     </div>
                 </div>
             </div>
@@ -1026,6 +1169,7 @@ def detail(id):
 
     opt_seznam = " selected" if rezim == "seznam" else ""
     opt_komise = " selected" if rezim == "komise" else ""
+    opt_katalog = " selected" if rezim == "katalog" else ""
     opt_nastaveni = " selected" if rezim == "nastaveni" else ""
 
     pk_edit = degustace["pocet_komisi"]
@@ -1132,6 +1276,16 @@ def detail(id):
                 align-items: flex-start;
                 justify-content: flex-end;
                 gap: 10px;
+                width: 100%;
+            }}
+            .title-right-top .form-rezim-select {{
+                margin-left: auto;
+            }}
+            .title-right-row2 {{
+                display: flex;
+                justify-content: flex-end;
+                width: 100%;
+                margin-top: 4px;
             }}
             .chrome-row-tools {{
                 display: grid;
@@ -1247,6 +1401,7 @@ def detail(id):
             }}
             .tisk-panel {{
                 display: none;
+                position: relative;
                 max-width: 360px;
                 padding: 10px 12px;
                 background: var(--surface);
@@ -1255,6 +1410,21 @@ def detail(id):
                 font-size: 13px;
                 text-align: left;
                 box-shadow: var(--shadow-md);
+            }}
+            .tisk-panel-close {{
+                position: absolute;
+                top: 6px;
+                right: 8px;
+                border: none;
+                background: transparent;
+                font-size: 20px;
+                line-height: 1;
+                cursor: pointer;
+                color: var(--text-muted);
+                padding: 2px 6px;
+            }}
+            .tisk-panel-close:hover {{
+                color: var(--text);
             }}
             .tisk-panel.is-open {{ display: block; }}
             .tisk-panel-actions {{
@@ -1636,6 +1806,11 @@ def detail(id):
                 color: #3d4248;
                 letter-spacing: 0.01em;
             }}
+            table.data-grid.table-katalog thead th {{
+                position: static;
+                top: auto;
+                z-index: auto;
+            }}
             .btn-danger {{
                 color: #9b1c1c;
                 border-color: #d4a0a0;
@@ -1762,6 +1937,7 @@ def detail(id):
         <div class="fixed-chrome" id="fixed-chrome">
             <div class="fixed-chrome-inner">
                 {flash_html}
+                {katalog_warning_html}
                 <div class="chrome-row1">
                     <div class="title-left title-block">
                         <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
@@ -1770,6 +1946,7 @@ def detail(id):
                     <div class="title-center">{escape(title_rezim_suffix)}</div>
                     <div class="title-right">
                         <div class="title-right-top">
+                            {'' if rezim == 'katalog' else f'''
                             <form method="post" class="edit-switch-form">
                                 <input type="hidden" name="action" value="set_edit">
                                 <input type="hidden" name="edit" value="{'0' if edit_mode else '1'}">
@@ -1779,6 +1956,7 @@ def detail(id):
                                     <span class="switch-knob"></span>
                                 </button>
                             </form>
+                            '''}
                             <form method="post" class="form-rezim-select">
                                 <input type="hidden" name="action" value="set_rezim">
                                 {ph}
@@ -1786,11 +1964,13 @@ def detail(id):
                                 <select name="rezim" id="sel-rezim" class="select-komise" onchange="this.form.submit()">
                                     <option value="seznam"{opt_seznam}>Seznam vzorků</option>
                                     <option value="komise"{opt_komise}>Komise</option>
+                                    <option value="katalog"{opt_katalog}>Katalog</option>
                                     <option value="nastaveni"{opt_nastaveni}>Nastavení</option>
                                 </select>
                             </form>
                             {('<div class="komise-panel-inline">' + tisk_html + komise_select_html + '</div>') if rezim == 'komise' else ''}
                         </div>
+                        {('<div class="title-right-row2">' + katalog_tisk_html + '</div>') if rezim == 'katalog' else ''}
                     </div>
                 </div>
                 {seznam_tools_row_html}
@@ -1828,6 +2008,31 @@ def detail(id):
         else:
             html += f'<p style="margin:0;">Aktuálně <strong>{pk_edit}</strong> komisí.</p>'
         html += "</div>"
+        html += '<div class="settings-block"><h2>Nastavení katalogu</h2>'
+        if edit_mode:
+            sel_a4 = " selected" if katalog_format == "A4" else ""
+            sel_a5 = " selected" if katalog_format == "A5" else ""
+            html += f"""
+            <form method="post" class="settings-row">
+                <input type="hidden" name="action" value="set_katalog_nastaveni">
+                {ph}
+                <label class="filter-label" for="inp-katalog-top">TOP počet</label>
+                <input id="inp-katalog-top" type="number" name="katalog_top_x" min="1" max="200" value="{katalog_top_x}"
+                    style="width:6rem;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                <label class="filter-label" for="sel-katalog-format">Formát tisku</label>
+                <select id="sel-katalog-format" name="katalog_format" class="select-komise">
+                    <option value="A4"{sel_a4}>A4</option>
+                    <option value="A5"{sel_a5}>A5</option>
+                </select>
+                <label class="filter-label" for="inp-katalog-font">Velikost písma (tisk)</label>
+                <input id="inp-katalog-font" type="number" name="katalog_font_pt" min="6" max="10" value="{katalog_font_pt}"
+                    style="width:5rem;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                <button class="btn btn-sm btn-primary" type="submit">Uložit</button>
+            </form>
+            """
+        else:
+            html += f'<p style="margin:0;">TOP počet: <strong>{katalog_top_x}</strong>, formát tisku: <strong>{katalog_format}</strong>, velikost písma: <strong>{katalog_font_pt} pt</strong>.</p>'
+        html += "</div>"
         html += '<div class="settings-block"><h2>Porotci / komisaři</h2>'
         html += '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">Jedno pole na komisi; jména oddělte čárkami.</p>'
         for k in range(1, n_kom + 1):
@@ -1847,7 +2052,103 @@ def detail(id):
                 """
             else:
                 html += f'<p style="margin:8px 0 12px;"><strong>Komise č.{k}:</strong> {escape(cur_jm) if cur_jm else "—"}</p>'
+        html += "</div>"
+        html += '<div class="settings-block"><h2>Výmaz dat vzorků</h2>'
+        if edit_mode:
+            html += f"""
+            <form method="post" class="settings-row"
+                onsubmit="return window.confirm('Opravdu smazat všechny vzorky této degustace?\\n\\nTato akce se nedá vrátit.');">
+                <input type="hidden" name="action" value="smaz_vse_vzorky">
+                {ph}
+                <button class="btn btn-sm btn-danger" type="submit">Smazat všechny vzorky</button>
+            </form>
+            """
+        else:
+            html += '<p style="margin:0;font-size:13px;color:var(--text-muted);">Výmaz je dostupný pouze v režimu Úpravy.</p>'
         html += "</div></div>"
+    elif rezim == "katalog":
+        top_scored = [v for v in vzorky_o if v["body"] is not None]
+        top_scored.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+        top_scored = top_scored[:katalog_top_x]
+
+        rank_all = [v for v in vzorky_o if v["body"] is not None]
+        rank_all.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+        poradi_katalog = {v["id"]: i + 1 for i, v in enumerate(rank_all)}
+
+        by_odruda = {}
+        for v in vzorky_o:
+            odr = (v["odruda"] or "Nezařazeno").strip() or "Nezařazeno"
+            by_odruda.setdefault(odr, []).append(v)
+        odrudy_sorted = sorted(by_odruda.keys(), key=lambda x: x.casefold())
+        for odr in odrudy_sorted:
+            by_odruda[odr].sort(key=lambda v: ((v["nazev"] or "").casefold(), v["cislo"]))
+
+        html += f"""
+            <div style="padding:14px 16px 8px;">
+                <h2 style="margin:0 0 10px;font-size:1.08rem;color:#223;">TOP {katalog_top_x} vzorků podle pořadí</h2>
+                <div style="overflow:auto;">
+                    <table class="data-grid table-katalog" style="margin-bottom:14px;">
+                        <thead><tr>
+                            <th>Pořadí</th><th>Číslo</th><th>Vystavovatel</th><th>Odrůda</th><th>Přívlastek</th><th>Rok</th><th>Body</th>
+                        </tr></thead>
+                        <tbody>
+        """
+        if top_scored:
+            for v in top_scored:
+                por = poradi_katalog.get(v["id"])
+                por_txt = f"{por}." if por else "—"
+                html += f"""
+                        <tr>
+                            <td class="poradi">{por_txt}</td>
+                            <td>{v["cislo"]}</td>
+                            <td>{escape(v["nazev"] or "")}</td>
+                            <td>{escape(v["odruda"] or "")}</td>
+                            <td>{escape(v["privlastek"] or "")}</td>
+                            <td>{escape(v["rocnik"] or "")}</td>
+                            <td>{format_body_hodnota(v["body"]) or "—"}</td>
+                        </tr>
+                """
+        else:
+            html += '<tr><td colspan="7" style="text-align:center;color:#666;">Zatím nejsou zadané body.</td></tr>'
+        html += """
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        """
+        html += '<div style="padding:6px 16px 16px;"><h2 style="margin:0 0 10px;font-size:1.08rem;color:#223;">Katalog podle odrůd</h2>'
+        for odr in odrudy_sorted:
+            html += f"""
+            <div style="margin:10px 0 14px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fff;">
+                <h3 style="margin:0 0 8px;font-size:1rem;color:#2a3f2a;">{escape(odr)}</h3>
+                <div style="overflow:auto;">
+                    <table class="data-grid table-katalog">
+                        <thead><tr>
+                            <th>Pořadí</th><th>Číslo</th><th>Vystavovatel</th><th>Adresa</th><th>Přívlastek</th><th>Rok</th><th>Body</th>
+                        </tr></thead>
+                        <tbody>
+            """
+            for v in by_odruda[odr]:
+                por = poradi_katalog.get(v["id"])
+                por_txt = f"{por}." if por else "—"
+                html += f"""
+                        <tr>
+                            <td class="poradi">{por_txt}</td>
+                            <td>{v["cislo"]}</td>
+                            <td>{escape(v["nazev"] or "")}</td>
+                            <td>{escape(v["adresa"] or "")}</td>
+                            <td>{escape(v["privlastek"] or "")}</td>
+                            <td>{escape(v["rocnik"] or "")}</td>
+                            <td>{format_body_hodnota(v["body"]) or "—"}</td>
+                        </tr>
+                """
+            html += """
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            """
+        html += "</div>"
     elif rezim == "komise":
 
         def _fmt_komise_dilci(x):
@@ -2040,7 +2341,33 @@ def detail(id):
             body_zobrazeni = format_body_hodnota(v["body"])
 
             if edit_mode:
-                html += f"""
+                vid = v["id"]
+                if edit_row_id and vid == edit_row_id:
+                    html += f"""
+                <form id="form-edit-{vid}" method="post" class="visually-hidden" aria-hidden="true">
+                    <input type="hidden" name="action" value="update_vzorek">
+                    <input type="hidden" name="vzorek_id" value="{vid}">
+                    {ph}
+                </form>
+                <tr>
+                    <td>{v["cislo"]}</td>
+                    <td><input name="nazev" form="form-edit-{vid}" autocomplete="off" value="{escape(v["nazev"] or "")}"></td>
+                    <td><input name="adresa" form="form-edit-{vid}" autocomplete="off" value="{escape(v["adresa"] or "")}"></td>
+                    <td><input name="odruda" form="form-edit-{vid}" autocomplete="off" value="{escape(v["odruda"] or "")}"></td>
+                    <td><input name="privlastek" form="form-edit-{vid}" autocomplete="off" value="{escape(v["privlastek"] or "")}"></td>
+                    <td><input name="rocnik" form="form-edit-{vid}" autocomplete="off" value="{escape(v["rocnik"] or "")}"></td>
+                    <td class="td-akce">
+                        <button class="btn btn-sm btn-primary" type="submit" form="form-edit-{vid}">Uložit</button>
+                        <form method="post" style="display:inline;">
+                            <input type="hidden" name="action" value="edit_row_cancel">
+                            {ph}
+                            <button type="submit" class="btn btn-sm" title="Zrušit úpravy">×</button>
+                        </form>
+                    </td>
+                </tr>
+                    """
+                else:
+                    html += f"""
                 <tr>
                     <td>{v["cislo"]}</td>
                     <td>{escape(v["nazev"] or "")}</td>
@@ -2055,9 +2382,15 @@ def detail(id):
                             {ph}
                             <button type="submit" class="btn btn-sm btn-danger">Smazat</button>
                         </form>
+                        <form method="post" style="display:inline;margin-left:6px;">
+                            <input type="hidden" name="action" value="edit_row">
+                            <input type="hidden" name="vzorek_id" value="{v["id"]}">
+                            {ph}
+                            <button type="submit" class="btn btn-sm">Editovat</button>
+                        </form>
                     </td>
                 </tr>
-                """
+                    """
             else:
                 p = poradi_map.get(v["id"])
                 poradi_cell = f"{p}." if p else "—"
@@ -2121,9 +2454,16 @@ def detail(id):
             }};
             var btnTisk = document.getElementById('btn-tisk-toggle');
             var panelTisk = document.getElementById('tisk-panel');
+            var btnTiskClose = document.getElementById('btn-tisk-close');
             if (btnTisk && panelTisk) {{
                 btnTisk.addEventListener('click', function () {{
                     panelTisk.classList.toggle('is-open');
+                    syncChromeHeight();
+                }});
+            }}
+            if (btnTiskClose && panelTisk) {{
+                btnTiskClose.addEventListener('click', function () {{
+                    panelTisk.classList.remove('is-open');
                     syncChromeHeight();
                 }});
             }}
@@ -2157,6 +2497,126 @@ def detail(id):
     </html>
     """
 
+    return html
+
+
+@app.route("/katalog_tisk/<int:id>")
+def katalog_tisk(id):
+    conn = get_connection()
+    degustace = conn.execute(
+        "SELECT * FROM degustace WHERE id = ?",
+        (id,),
+    ).fetchone()
+    vzorky = conn.execute(
+        "SELECT * FROM vzorky WHERE degustace_id = ? ORDER BY cislo",
+        (id,),
+    ).fetchall()
+    conn.close()
+
+    top_x = degustace["katalog_top_x"]
+    try:
+        top_x = int(top_x) if top_x is not None else 15
+    except (TypeError, ValueError):
+        top_x = 15
+    top_x = max(1, min(200, top_x))
+    fmt = (degustace["katalog_format"] or "A4").strip().upper()
+    if fmt not in ("A4", "A5"):
+        fmt = "A4"
+
+    top_scored = [v for v in vzorky if v["body"] is not None]
+    top_scored.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+    top_scored = top_scored[:top_x]
+
+    by_odruda = {}
+    for v in vzorky:
+        k = (v["odruda"] or "Nezařazeno").strip() or "Nezařazeno"
+        by_odruda.setdefault(k, []).append(v)
+    odrudy_sorted = sorted(by_odruda.keys(), key=lambda x: x.casefold())
+    for k in odrudy_sorted:
+        by_odruda[k].sort(key=lambda v: ((v["nazev"] or "").casefold(), v["cislo"]))
+
+    poradi_all = [v for v in vzorky if v["body"] is not None]
+    poradi_all.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+    poradi_map = {v["id"]: i + 1 for i, v in enumerate(poradi_all)}
+
+    sheet_w = "210mm" if fmt == "A4" else "148mm"
+    font_pt = degustace["katalog_font_pt"]
+    try:
+        font_pt = int(font_pt) if font_pt is not None else 8
+    except (TypeError, ValueError):
+        font_pt = 8
+    font_pt = max(6, min(10, font_pt))
+
+    line_h = "1.1" if font_pt <= 7 else "1.2"
+
+    html = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Katalog – {escape(degustace["nazev"] or "")}</title>
+        <style>
+            @page {{ size: {fmt}; margin: 7mm; }}
+            body {{ margin: 0; background:#efefef; color:#222; font-family: Arial, sans-serif; }}
+            .sheet {{
+                width: {sheet_w};
+                min-height: calc({sheet_w} * 1.414);
+                margin: 10px auto;
+                background:#fff;
+                box-shadow: 0 0 0 1px #ddd;
+                padding: 7mm;
+                box-sizing: border-box;
+                font-size: {font_pt}pt;
+                line-height: {line_h};
+            }}
+            h1 {{ margin:0 0 1mm 0; font-size:1.6em; }}
+            h2 {{ margin:3mm 0 1.5mm; font-size:1.25em; font-weight:700; }}
+            h3 {{ margin:2mm 0 1mm; font-size:1.1em; font-weight:700; }}
+            .meta {{ margin-bottom:2mm; color:#555; font-size:8pt; }}
+            table {{ width:100%; border-collapse:collapse; margin:0 0 2mm 0; table-layout: fixed; }}
+            th, td {{ border:none; padding:0.8mm 1.1mm; vertical-align:top; text-align:left; }}
+            table, thead th, tbody td {{ font-size:{font_pt}pt; line-height:{line_h}; }}
+            thead th {{ font-weight:700; }}
+            .odr-block {{ margin:0 0 2mm 0; page-break-inside: avoid; }}
+            @media print {{
+                body {{ background:#fff; }}
+                .sheet {{ margin: 0; width: auto; min-height: auto; box-shadow: none; padding: 0; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="sheet">
+        <h1>{escape(degustace["nazev"] or "")}</h1>
+        <div class="meta">Katalog vzorků · datum {escape(format_datum_cz(degustace["datum"]))} · formát {fmt} · font {font_pt} pt</div>
+        <h2>TOP {top_x} vzorků podle pořadí</h2>
+        <table>
+            <tr><th>Pořadí</th><th>Číslo</th><th>Vystavovatel</th><th>Odrůda</th><th>Přívlastek</th><th>Rok</th><th>Body</th></tr>
+    """
+    if top_scored:
+        for v in top_scored:
+            por = poradi_map.get(v["id"])
+            por_txt = f"{por}." if por else "—"
+            html += f"""
+            <tr>
+                <td>{por_txt}</td><td>{v["cislo"]}</td><td>{escape(v["nazev"] or "")}</td><td>{escape(v["odruda"] or "")}</td>
+                <td>{escape(v["privlastek"] or "")}</td><td>{escape(v["rocnik"] or "")}</td><td>{format_body_hodnota(v["body"]) or "—"}</td>
+            </tr>
+            """
+    else:
+        html += '<tr><td colspan="7" style="text-align:center;color:#666;">Zatím nejsou zadané body.</td></tr>'
+    html += "</table><h2>Všechny vzorky podle odrůd</h2>"
+    for odr in odrudy_sorted:
+        html += f'<div class="odr-block"><h3>{escape(odr)}</h3><table><tr><th>Pořadí</th><th>Číslo</th><th>Vystavovatel</th><th>Adresa</th><th>Přívlastek</th><th>Rok</th><th>Body</th></tr>'
+        for v in by_odruda[odr]:
+            por = poradi_map.get(v["id"])
+            por_txt = f"{por}." if por else "—"
+            html += f"""
+            <tr>
+                <td>{por_txt}</td><td>{v["cislo"]}</td><td>{escape(v["nazev"] or "")}</td><td>{escape(v["adresa"] or "")}</td>
+                <td>{escape(v["privlastek"] or "")}</td><td>{escape(v["rocnik"] or "")}</td><td>{format_body_hodnota(v["body"]) or "—"}</td>
+            </tr>
+            """
+        html += "</table></div>"
+    html += "</div></body></html>"
     return html
 
 
