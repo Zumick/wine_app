@@ -1,10 +1,11 @@
 from flask import Flask, request, redirect, flash, get_flashed_messages, session
 from markupsafe import escape
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from db import get_connection
 import csv
 import io
 import os
+import json
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-nahradit-pro-produkci")
@@ -1115,8 +1116,17 @@ def detail(id):
         """
 
     katalog_tisk_html = ""
+    katalog_qr_html = ""
     if rezim == "katalog":
         katalog_tisk_html = f'<a class="btn btn-primary btn-sm" href="/katalog_tisk/{id}" target="_blank">Tisk katalogu</a>'
+        katalog_mobile_url = request.url_root.rstrip("/") + f"/mobile-katalog/{id}"
+        katalog_mobile_qr = f"https://api.qrserver.com/v1/create-qr-code/?size=72x72&data={quote(katalog_mobile_url, safe='')}"
+        katalog_qr_html = (
+            f'<div class="catalog-qr-wrap catalog-qr-header">'
+            f'<img class="catalog-qr-img" src="{katalog_mobile_qr}" alt="QR odkaz na mobilní e-katalog" width="72" height="72">'
+            f'<a class="catalog-qr-link" href="{katalog_mobile_url}" target="_blank">Otevřít e-katalog</a>'
+            f'</div>'
+        )
 
     seznam_tools_row_html = ""
     if rezim == "seznam":
@@ -1166,6 +1176,35 @@ def detail(id):
                 </div>
             </div>
             """
+
+    katalog_tools_row_html = ""
+    if rezim == "katalog":
+        filter_row_k = ""
+        if not edit_mode:
+            zrusit_k = ""
+            if q_raw:
+                href_clear_k = _build_degustace_url(id, sort_key, sort_dir, "")
+                zrusit_k = f'<a class="btn btn-ghost" href="{href_clear_k}">Zrušit filtr</a>'
+            filter_row_k = f"""
+                <form method="get" action="/degustace/{id}" class="filter-row filter-row-tools" role="search">
+                    <input type="hidden" name="sort" value="{escape(sort_key)}">
+                    <input type="hidden" name="dir" value="{escape(sort_dir)}">
+                    <label for="filtr-q-katalog" class="filter-label">Hledat</label>
+                    <input id="filtr-q-katalog" type="search" name="q" value="{escape(q_raw)}"
+                        placeholder="Všechna slova musí pasovat…" autocomplete="off">
+                    <button class="btn" type="submit">Použít filtr</button>
+                    {zrusit_k}
+                </form>
+            """
+        katalog_tools_row_html = f"""
+            <div class="chrome-row-tools">
+                <div class="chrome-row-tools-left">
+                    <a class="link-back tools-back-link" href="/">← Zpět na degustace</a>
+                </div>
+                <div class="chrome-row-tools-center">{filter_row_k}</div>
+                <div class="chrome-row-tools-right"></div>
+            </div>
+        """
 
     opt_seznam = " selected" if rezim == "seznam" else ""
     opt_komise = " selected" if rezim == "komise" else ""
@@ -1284,8 +1323,50 @@ def detail(id):
             .title-right-row2 {{
                 display: flex;
                 justify-content: flex-end;
+                align-items: flex-start;
+                gap: 10px;
                 width: 100%;
                 margin-top: 4px;
+            }}
+            .catalog-qr-wrap {{
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                min-width: 96px;
+            }}
+            .catalog-qr-header {{
+                flex-direction: row;
+                align-items: flex-start;
+                gap: 8px;
+                min-width: 0;
+                flex-shrink: 0;
+            }}
+            .catalog-qr-header .catalog-qr-img {{
+                width: 72px;
+                height: 72px;
+                flex-shrink: 0;
+            }}
+            .catalog-qr-header .catalog-qr-link {{
+                align-self: center;
+                max-width: 9rem;
+                line-height: 1.25;
+            }}
+            .catalog-qr-img {{
+                width: 96px;
+                height: 96px;
+                border-radius: 6px;
+                border: 1px solid var(--border);
+                background: #fff;
+            }}
+            .catalog-qr-link {{
+                font-size: 11px;
+                color: var(--text-muted);
+                text-decoration: none;
+            }}
+            .catalog-qr-link:hover {{
+                color: var(--accent);
+                text-decoration: underline;
             }}
             .chrome-row-tools {{
                 display: grid;
@@ -1946,6 +2027,7 @@ def detail(id):
                     <div class="title-center">{escape(title_rezim_suffix)}</div>
                     <div class="title-right">
                         <div class="title-right-top">
+                            {katalog_qr_html if rezim == 'katalog' else ''}
                             {'' if rezim == 'katalog' else f'''
                             <form method="post" class="edit-switch-form">
                                 <input type="hidden" name="action" value="set_edit">
@@ -1974,6 +2056,7 @@ def detail(id):
                     </div>
                 </div>
                 {seznam_tools_row_html}
+                {katalog_tools_row_html}
             </div>
         </div>
 
@@ -2067,16 +2150,18 @@ def detail(id):
             html += '<p style="margin:0;font-size:13px;color:var(--text-muted);">Výmaz je dostupný pouze v režimu Úpravy.</p>'
         html += "</div></div>"
     elif rezim == "katalog":
-        top_scored = [v for v in vzorky_o if v["body"] is not None]
-        top_scored.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
-        top_scored = top_scored[:katalog_top_x]
+        vzorky_k = _filter_vzorky(vzorky_o, q_raw)
 
         rank_all = [v for v in vzorky_o if v["body"] is not None]
         rank_all.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
         poradi_katalog = {v["id"]: i + 1 for i, v in enumerate(rank_all)}
 
+        top_scored = [v for v in vzorky_k if v["body"] is not None]
+        top_scored.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+        top_scored = top_scored[:katalog_top_x]
+
         by_odruda = {}
-        for v in vzorky_o:
+        for v in vzorky_k:
             odr = (v["odruda"] or "Nezařazeno").strip() or "Nezařazeno"
             by_odruda.setdefault(odr, []).append(v)
         odrudy_sorted = sorted(by_odruda.keys(), key=lambda x: x.casefold())
@@ -2500,6 +2585,430 @@ def detail(id):
     return html
 
 
+@app.route("/mobile-katalog/<int:id>")
+def mobile_katalog(id):
+    conn = get_connection()
+    degustace = conn.execute(
+        "SELECT * FROM degustace WHERE id = ?",
+        (id,),
+    ).fetchone()
+    vzorky = conn.execute(
+        "SELECT * FROM vzorky WHERE degustace_id = ? ORDER BY cislo",
+        (id,),
+    ).fetchall()
+    porotci_rows = conn.execute(
+        "SELECT komise_cislo, jmena FROM komise_porotci WHERE degustace_id=? ORDER BY komise_cislo",
+        (id,),
+    ).fetchall()
+    conn.close()
+
+    rank_all = [v for v in vzorky if v["body"] is not None]
+    rank_all.sort(key=lambda v: (-float(v["body"]), v["cislo"]))
+    poradi_map = {v["id"]: i + 1 for i, v in enumerate(rank_all)}
+
+    abbr_to_full = {}
+    full_to_abbr = {}
+    for rel in ("input/odrudy.txt", "input/odrudy0.txt"):
+        p = os.path.join(os.path.dirname(__file__), rel)
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except UnicodeDecodeError:
+            with open(p, "r", encoding="cp1250") as f:
+                lines = f.read().splitlines()
+        for ln in lines[1:]:
+            parts = [x.strip() for x in ln.split("\t")]
+            if len(parts) < 2:
+                continue
+            ab = parts[0]
+            full = parts[1]
+            if not ab:
+                continue
+            abbr_to_full[ab] = full or ab
+            full_to_abbr[(full or "").casefold()] = ab
+
+    abbr_entries = [{"abbr": a, "full": f} for a, f in abbr_to_full.items()]
+    abbr_entries.sort(key=lambda x: x["abbr"].casefold())
+
+    porotci_entries = []
+    for r in porotci_rows:
+        porotci_entries.append({
+            "komise": int(r["komise_cislo"]),
+            "jmena": (r["jmena"] or "").strip(),
+        })
+
+    data = []
+    abbr_case_map = {k.casefold(): k for k in abbr_to_full.keys()}
+    for v in vzorky:
+        odr_full = (v["odruda"] or "").strip() or "Nezařazeno"
+        ab_from_full = full_to_abbr.get(odr_full.casefold())
+        ab_from_key = abbr_case_map.get(odr_full.casefold())
+        odr_abbr = ab_from_full or ab_from_key or odr_full
+        data.append({
+            "id": int(v["id"]),
+            "poradi": poradi_map.get(v["id"]),
+            "cislo": v["cislo"],
+            "vystavovatel": v["nazev"] or "",
+            "adresa": v["adresa"] or "",
+            "odruda": odr_full,
+            "odruda_abbr": odr_abbr,
+            "privlastek": v["privlastek"] or "",
+            "rocnik": v["rocnik"] or "",
+            "body": float(v["body"]) if v["body"] is not None else None,
+        })
+
+    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    payload_abbr = json.dumps(abbr_entries, ensure_ascii=False).replace("</", "<\\/")
+    payload_porotci = json.dumps(porotci_entries, ensure_ascii=False).replace("</", "<\\/")
+    title = escape(degustace["nazev"] or "E-katalog")
+
+    html = f"""<!DOCTYPE html>
+    <html lang="cs">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>E-katalog – {title}</title>
+        <style>
+            :root {{
+                --bg: #f2f4f6;
+                --card: #fff;
+                --text: #1f2933;
+                --muted: #667084;
+                --accent: #2f5e2b;
+                --border: #dde2e8;
+            }}
+            * {{ box-sizing: border-box; }}
+            body {{ margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }}
+            .app {{ max-width: 720px; margin: 0 auto; min-height: 100vh; }}
+            .top {{
+                position: sticky; top: 0; z-index: 10; background: #fff;
+                margin: 8px 12px 6px; padding: 12px 12px 10px;
+                border: 1px solid var(--border); border-radius: 10px;
+                box-shadow: 0 1px 0 rgba(0,0,0,0.03);
+            }}
+            .top-head {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }}
+            .title {{ font-size: 18px; font-weight: 700; margin: 0; }}
+            .btn-info {{ border:1px solid var(--border); background:#fff; border-radius:8px; padding:7px 10px; font-size:12px; font-weight:600; }}
+            .tabs {{ display: flex; gap: 6px; margin-bottom: 8px; }}
+            .tab {{
+                flex: 1; border: 1px solid var(--border); background:#fff; border-radius: 8px; padding: 8px 6px;
+                font-size: 13px; font-weight: 600;
+            }}
+            .tab.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+            .search {{ width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 14px; }}
+            .meta {{ color: var(--muted); font-size: 12px; margin: 6px 0 0; padding: 0 2px; display: none; }}
+            .section-title {{ margin: 10px 12px 6px; font-size: 14px; color: var(--muted); font-weight: 700; }}
+            /* overflow: visible — overflow:hidden na předkovi rozbíjí sticky thead v mobilních prohlížečích */
+            .tbl-wrap {{ background: #fff; border: 1px solid var(--border); border-radius: 10px; margin: 0 12px 8px; overflow: visible; }}
+            table.tbl {{ width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 12px; }}
+            .tbl thead th {{
+                position: sticky; top: var(--thead-top, 200px); z-index: 9; background: #fff;
+                padding: 8px 4px; text-align: left; font-weight: 700; color: #44505d;
+                white-space: nowrap; border-bottom: 1px solid #e8edf2; vertical-align: middle;
+            }}
+            .tbl thead th:first-child {{ border-top-left-radius: 10px; }}
+            .tbl thead th:last-child {{ border-top-right-radius: 10px; }}
+            .tbl thead th.col-num {{ width: 44px; }}
+            .tbl thead th.col-fav-star {{ width: 42px; text-align: center; }}
+            .tbl thead th.col-vinar {{ width: 32%; }}
+            .tbl thead th.col-odruda {{ width: 13%; }}
+            .tbl thead th.col-priv {{ width: 9%; }}
+            .tbl thead th.col-roc {{ width: 4.5rem; }}
+            .tbl thead th.col-body {{ width: 3.25rem; }}
+            .tbl thead th.col-tasted {{ width: 40px; text-align: center; }}
+            .tbl thead th.col-priv, .tbl thead th.col-roc, .tbl thead th.col-body {{ text-align: center; }}
+            .tbl thead th.col-priv .sort-btn, .tbl thead th.col-roc .sort-btn, .tbl thead th.col-body .sort-btn {{ width: 100%; text-align: center; }}
+            .tbl tbody {{ position: relative; z-index: 0; }}
+            .tbl tbody td {{ padding: 8px 4px; vertical-align: middle; border: none; }}
+            .tbl tbody td.col-vinar {{ word-wrap: break-word; overflow-wrap: break-word; hyphens: auto; }}
+            .tbl tbody td.col-priv, .tbl tbody td.col-roc, .tbl tbody td.col-body {{ text-align: center; }}
+            .tbl tbody td.col-fav-star {{ text-align: center; width: 42px; }}
+            .tbl tbody td.col-tasted {{ text-align: right; width: 40px; }}
+            .tbl tbody tr.main-row td {{ border-top: 1px solid #f0f2f4; }}
+            .num-btn {{
+                border: 1px solid var(--border); background: #fff; border-radius: 999px; width: 34px; height: 34px;
+                font-size: 12px; font-weight: 700; color: var(--accent);
+            }}
+            .num-btn.open {{ background: #eef6ed; border-color: #b9d4b4; }}
+            .fav-inline {{
+                border: none; background: transparent; padding: 4px; font-size: 20px; line-height: 1;
+                color: #9a6d00; min-width: 38px; text-align: center;
+            }}
+            .fav-inline.on {{ color: #c77900; }}
+            .tasted-btn {{
+                border: none; background: transparent; padding: 4px; font-size: 18px; line-height: 1;
+                color: #94a0ad; min-width: 36px; text-align: center;
+            }}
+            .tasted-btn.on {{ color: var(--accent); font-weight: 700; }}
+            .detail-row {{ display: none; }}
+            .detail-row.open {{ display: table-row; }}
+            .detail-box {{ color: var(--muted); font-size: 12px; padding-top: 0; }}
+            .sort-btn {{ border: none; background: transparent; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }}
+            .sort-btn-active {{ color: var(--accent); font-weight: 700; }}
+            .sort-col-active {{ background: #f4faf3; }}
+            .sort-sym {{
+                display: inline-block; margin-left: 4px; font-size: 13px; font-weight: 800;
+                color: #5c6b7a; min-width: 1.1em; text-align: center;
+            }}
+            .sort-sym-active {{
+                color: var(--accent); background: #e8f2e6; border-radius: 4px; padding: 1px 5px;
+            }}
+            .empty {{ margin: 20px 12px; padding: 14px; border: 1px dashed var(--border); border-radius: 10px; color: var(--muted); background:#fff; }}
+            .modal-bg {{ position: fixed; inset: 0; background: rgba(0,0,0,0.28); display: none; z-index: 30; }}
+            .modal-bg.open {{ display: block; }}
+            .modal {{
+                position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                width: min(92vw, 720px); max-height: 86vh; overflow: auto;
+                background: #fff; border-radius: 12px; border: 1px solid var(--border); padding: 12px;
+            }}
+            .modal-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
+            .close-x {{ border:none; background:transparent; font-size:22px; line-height:1; cursor:pointer; }}
+            .abbr-grid {{ display:grid; grid-template-columns: 90px 1fr; gap: 4px 10px; font-size: 12px; }}
+            .abbr-grid div {{ padding: 2px 0; }}
+            .kom-list p {{ margin: 4px 0; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+    <div class="app">
+        <div class="top">
+            <div class="top-head">
+                <h1 class="title">{title}</h1>
+                <button id="btn-info" class="btn-info" type="button">Info o degustaci</button>
+            </div>
+            <div class="tabs">
+                <button class="tab active" data-mode="all">Vše</button>
+                <button class="tab" data-mode="odrudy">Odrůdy</button>
+                <button class="tab" data-mode="fav">Oblíbené</button>
+            </div>
+            <input id="q" class="search" type="search" placeholder="Hledat: vystavovatel, odrůda, ročník...">
+            <div class="meta" id="count"></div>
+        </div>
+        <div id="list"></div>
+    </div>
+    <div class="modal-bg" id="modal-bg">
+      <div class="modal" id="modal-card">
+        <div class="modal-head">
+          <strong>Info o degustaci</strong>
+          <button type="button" class="close-x" id="btn-close" aria-label="Zavřít">×</button>
+        </div>
+        <h3 style="margin:8px 0 6px;font-size:13px;">Význam zkratek</h3>
+        <div class="abbr-grid" id="abbr-grid"></div>
+        <h3 style="margin:12px 0 6px;font-size:13px;">Členové komisí</h3>
+        <div class="kom-list" id="kom-list"></div>
+      </div>
+    </div>
+    <script>
+    const vzorky = {payload};
+    const odrudyInfo = {payload_abbr};
+    const porotci = {payload_porotci};
+    const favKey = "ekatalog-favorites-{id}";
+    const tastedKey = "ekatalog-tasted-{id}";
+    const state = {{
+      mode: "all",
+      query: "",
+      fav: new Set(JSON.parse(localStorage.getItem(favKey) || "[]")),
+      tasted: new Set(JSON.parse(localStorage.getItem(tastedKey) || "[]")),
+      expanded: new Set(),
+      sortKey: "body",
+      sortDir: "desc"
+    }};
+    const listEl = document.getElementById("list");
+    const countEl = document.getElementById("count");
+    const qEl = document.getElementById("q");
+    const modalBg = document.getElementById("modal-bg");
+    const modalCard = document.getElementById("modal-card");
+    function cmpVal(a, b, numeric) {{
+      const aa = (a == null || a === "") ? null : a;
+      const bb = (b == null || b === "") ? null : b;
+      if (aa == null && bb == null) return 0;
+      if (aa == null) return 1;
+      if (bb == null) return -1;
+      if (numeric) return Number(aa) - Number(bb);
+      return String(aa).localeCompare(String(bb), "cs");
+    }}
+    function sortRows(arr) {{
+      const key = state.sortKey;
+      const dir = state.sortDir === "asc" ? 1 : -1;
+      const out = [...arr];
+      out.sort((a, b) => {{
+        if (key === "body" || key === "poradi" || key === "cislo") {{
+          const c = cmpVal(a[key], b[key], true);
+          if (c !== 0) return c * dir;
+          return cmpVal(a.cislo, b.cislo, true);
+        }}
+        const c = cmpVal(a[key], b[key], false);
+        if (c !== 0) return c * dir;
+        return cmpVal(a.cislo, b.cislo, true);
+      }});
+      return out;
+    }}
+    function toggleFav(id) {{
+      if (state.fav.has(id)) state.fav.delete(id); else state.fav.add(id);
+      localStorage.setItem(favKey, JSON.stringify([...state.fav]));
+      render();
+    }}
+    function toggleTasted(id) {{
+      if (state.tasted.has(id)) state.tasted.delete(id); else state.tasted.add(id);
+      localStorage.setItem(tastedKey, JSON.stringify([...state.tasted]));
+      render();
+    }}
+    function toggleDetail(id) {{
+      if (state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+      render();
+    }}
+    function setSort(key) {{
+      if (state.sortKey === key) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+      else {{ state.sortKey = key; state.sortDir = "asc"; }}
+      render();
+    }}
+    function sortSym(key) {{
+      if (state.sortKey !== key) return "↕";
+      return state.sortDir === "asc" ? "↑" : "↓";
+    }}
+    const SORT_COL_CLASS = {{ vystavovatel: " col-vinar", odruda: " col-odruda", privlastek: " col-priv", rocnik: " col-roc", body: " col-body" }};
+    function thSort(key, label) {{
+      const active = state.sortKey === key;
+      const ac = active ? " sort-col-active" : "";
+      const ba = active ? " sort-btn-active" : "";
+      const sa = active ? " sort-sym-active" : "";
+      const col = SORT_COL_CLASS[key] || "";
+      return '<th class="col-sort' + ac + col + '" scope="col"><button type="button" class="sort-btn' + ba + '" data-sort="' + key + '">' + label + ' <span class="sort-sym' + sa + '">' + sortSym(key) + '</span></button></th>';
+    }}
+    function fmtBody(v) {{ return v == null ? "—" : String(v.toFixed ? v.toFixed(1) : v).replace(".", ","); }}
+    function rowText(v) {{
+      return [v.vystavovatel, v.adresa, v.odruda, v.privlastek, v.rocnik, v.cislo].join(" ").toLowerCase();
+    }}
+    function getBase() {{
+      let out = [...vzorky];
+      if (state.mode === "fav") out = out.filter(v => state.fav.has(v.id));
+      if (state.query) out = out.filter(v => rowText(v).includes(state.query));
+      return sortRows(out);
+    }}
+    function headerRow() {{
+      return '<thead><tr>' +
+        '<th class="col-num" scope="col">#</th>' +
+        '<th class="col-fav-star" scope="col" aria-label="Oblíbené"></th>' +
+        thSort("vystavovatel", "Vinař") +
+        thSort("odruda", "Odrůda") +
+        thSort("privlastek", "Přívl.") +
+        thSort("rocnik", "Rok") +
+        thSort("body", "Body") +
+        '<th class="col-tasted" scope="col" aria-label="Koštováno"></th>' +
+        '</tr></thead>';
+    }}
+    function twoRows(v, useAbbr) {{
+      const por = v.poradi ? (v.poradi + ".") : "—";
+      const isOpen = state.expanded.has(v.id);
+      const fav = state.fav.has(v.id) ? "★" : "☆";
+      const odr = useAbbr ? (v.odruda_abbr || v.odruda) : (v.odruda || "—");
+      return `
+      <tr class="main-row">
+        <td class="col-num"><button type="button" class="num-btn ${{isOpen ? "open" : ""}}" data-exp="${{v.id}}">${{v.cislo}}</button></td>
+        <td class="col-fav-star"><button type="button" class="fav-inline ${{state.fav.has(v.id) ? "on" : ""}}" data-fav="${{v.id}}" aria-label="Oblíbený vzorek">${{fav}}</button></td>
+        <td class="col-vinar">${{v.vystavovatel || "—"}}</td>
+        <td class="col-odruda">${{odr}}</td>
+        <td class="col-priv">${{v.privlastek || "—"}}</td>
+        <td class="col-roc">${{v.rocnik || "—"}}</td>
+        <td class="col-body">${{fmtBody(v.body)}}</td>
+        <td class="col-tasted"><button type="button" class="tasted-btn ${{state.tasted.has(v.id) ? "on" : ""}}" data-tasted="${{v.id}}" aria-pressed="${{state.tasted.has(v.id)}}" aria-label="Koštováno">${{state.tasted.has(v.id) ? "✓" : "○"}}</button></td>
+      </tr>
+      <tr class="detail-row ${{isOpen ? "open" : ""}}">
+        <td colspan="8" class="detail-box"><strong>Pořadí:</strong> ${{por}} &nbsp;&nbsp; <strong>Adresa:</strong> ${{v.adresa || "—"}}</td>
+      </tr>`;
+    }}
+    function renderTable(rows, useAbbr) {{
+      if (!rows.length) return `<div class="empty">Žádné položky pro aktuální filtr.</div>`;
+      return `<div class="tbl-wrap"><table class="tbl">${{headerRow()}}<tbody>${{rows.map(v => twoRows(v, useAbbr)).join("")}}</tbody></table></div>`;
+    }}
+    function renderByOdrudy(base) {{
+      if (!base.length) return `<div class="empty">Žádné položky pro aktuální filtr.</div>`;
+      const grp = {{}};
+      for (const v of base) {{ (grp[v.odruda || "Nezařazeno"] ||= []).push(v); }}
+      const keys = Object.keys(grp).sort((a,b)=>a.localeCompare(b,"cs"));
+      return keys.map(k => `<div class="section-title">${{k}} (${{grp[k].length}})</div>${{renderTable(grp[k], true)}}`).join("");
+    }}
+    function bindActions() {{
+      listEl.querySelectorAll("[data-fav]").forEach(btn => btn.addEventListener("click", (e) => {{ e.preventDefault(); e.stopPropagation(); toggleFav(Number(btn.dataset.fav)); }}));
+      listEl.querySelectorAll("[data-tasted]").forEach(btn => btn.addEventListener("click", (e) => {{ e.preventDefault(); e.stopPropagation(); toggleTasted(Number(btn.dataset.tasted)); }}));
+      listEl.querySelectorAll("[data-exp]").forEach(btn => btn.addEventListener("click", () => toggleDetail(Number(btn.dataset.exp))));
+      listEl.querySelectorAll("[data-sort]").forEach(btn => btn.addEventListener("click", () => setSort(btn.dataset.sort)));
+    }}
+    function syncStickyTop() {{
+      const topEl = document.querySelector(".top");
+      if (!topEl) return;
+      const h = Math.round(topEl.getBoundingClientRect().height);
+      document.documentElement.style.setProperty("--thead-top", h + "px");
+    }}
+    function scheduleStickySync() {{
+      syncStickyTop();
+      requestAnimationFrame(() => {{
+        syncStickyTop();
+        requestAnimationFrame(() => {{ syncStickyTop(); }});
+      }});
+    }}
+    function fillInfoModal() {{
+      const ag = document.getElementById("abbr-grid");
+      const kl = document.getElementById("kom-list");
+      ag.innerHTML = odrudyInfo.map(r => `<div><strong>${{r.abbr}}</strong></div><div>${{r.full}}</div>`).join("");
+      if (!porotci.length) kl.innerHTML = `<p>Členové komisí zatím nejsou vyplněni.</p>`;
+      else kl.innerHTML = porotci.map(r => `<p><strong>Komise č.${{r.komise}}:</strong> ${{r.jmena || "—"}}</p>`).join("");
+    }}
+    function render() {{
+        const allInMode = sortRows((state.mode === "fav")
+            ? vzorky.filter(v => state.fav.has(v.id))
+            : [...vzorky]
+        );
+        const base = getBase();
+
+        const filterOn = !!state.query;
+        countEl.style.display = filterOn ? "block" : "none";
+        if (filterOn) {{
+            countEl.textContent = `Zobrazeno položek ${{base.length}}/${{allInMode.length}}`;
+        }}
+
+        if (state.mode === "odrudy") listEl.innerHTML = renderByOdrudy(base);
+        else if (state.mode === "fav") listEl.innerHTML = base.length ? renderTable(base, false) : `<div class="empty">Zatím nemáte žádné oblíbené vzorky.</div>`;
+        else listEl.innerHTML = renderTable(base, false);
+
+        bindActions();
+        scheduleStickySync();
+    }}
+
+
+    document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {{
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      btn.classList.add("active");
+      state.mode = btn.getAttribute("data-mode");
+      render();
+    }}));
+    qEl.addEventListener("input", () => {{ state.query = qEl.value.trim().toLowerCase(); render(); }});
+    window.addEventListener("resize", scheduleStickySync);
+    window.addEventListener("orientationchange", scheduleStickySync);
+    (function initStickyHeader() {{
+      const topEl = document.querySelector(".top");
+      if (!topEl) return;
+      if (window.ResizeObserver) {{
+        new ResizeObserver(() => scheduleStickySync()).observe(topEl);
+      }}
+      let scrollRaf = 0;
+      window.addEventListener("scroll", () => {{
+        if (scrollRaf) return;
+        scrollRaf = requestAnimationFrame(() => {{ scrollRaf = 0; scheduleStickySync(); }});
+      }}, {{ passive: true }});
+    }})();
+    document.getElementById("btn-info").addEventListener("click", () => modalBg.classList.add("open"));
+    document.getElementById("btn-close").addEventListener("click", () => modalBg.classList.remove("open"));
+    modalBg.addEventListener("click", (e) => {{ if (e.target === modalBg) modalBg.classList.remove("open"); }});
+    fillInfoModal();
+    render();
+    </script>
+    </body></html>
+    """
+    return html
+
+
 @app.route("/katalog_tisk/<int:id>")
 def katalog_tisk(id):
     conn = get_connection()
@@ -2540,6 +3049,8 @@ def katalog_tisk(id):
     poradi_map = {v["id"]: i + 1 for i, v in enumerate(poradi_all)}
 
     sheet_w = "210mm" if fmt == "A4" else "148mm"
+    mobile_url = request.url_root.rstrip("/") + f"/mobile-katalog/{id}"
+    mobile_qr = f"https://api.qrserver.com/v1/create-qr-code/?size=140x140&data={quote(mobile_url, safe='')}"
     font_pt = degustace["katalog_font_pt"]
     try:
         font_pt = int(font_pt) if font_pt is not None else 8
@@ -2572,6 +3083,12 @@ def katalog_tisk(id):
             h2 {{ margin:3mm 0 1.5mm; font-size:1.25em; font-weight:700; }}
             h3 {{ margin:2mm 0 1mm; font-size:1.1em; font-weight:700; }}
             .meta {{ margin-bottom:2mm; color:#555; font-size:8pt; }}
+            .top-wrap {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 4mm; margin-bottom: 2mm; }}
+            .top-left {{ min-width: 0; }}
+            .qr-box {{ text-align: right; }}
+            .qr-box img {{ width: 24mm; height: 24mm; display: block; margin-left: auto; }}
+            .qr-box a {{ color:#555; text-decoration: none; font-size: 7pt; }}
+            .qr-box a:hover {{ text-decoration: underline; }}
             table {{ width:100%; border-collapse:collapse; margin:0 0 2mm 0; table-layout: fixed; }}
             th, td {{ border:none; padding:0.8mm 1.1mm; vertical-align:top; text-align:left; }}
             table, thead th, tbody td {{ font-size:{font_pt}pt; line-height:{line_h}; }}
@@ -2585,8 +3102,16 @@ def katalog_tisk(id):
     </head>
     <body>
         <div class="sheet">
-        <h1>{escape(degustace["nazev"] or "")}</h1>
-        <div class="meta">Katalog vzorků · datum {escape(format_datum_cz(degustace["datum"]))} · formát {fmt} · font {font_pt} pt</div>
+        <div class="top-wrap">
+            <div class="top-left">
+                <h1>{escape(degustace["nazev"] or "")}</h1>
+                <div class="meta">Katalog vzorků · datum {escape(format_datum_cz(degustace["datum"]))} · formát {fmt} · font {font_pt} pt</div>
+            </div>
+            <div class="qr-box">
+                <img src="{mobile_qr}" alt="QR odkaz na mobilní e-katalog">
+                <a href="{mobile_url}" target="_blank">Mobilní e-katalog</a>
+            </div>
+        </div>
         <h2>TOP {top_x} vzorků podle pořadí</h2>
         <table>
             <tr><th>Pořadí</th><th>Číslo</th><th>Vystavovatel</th><th>Odrůda</th><th>Přívlastek</th><th>Rok</th><th>Body</th></tr>
