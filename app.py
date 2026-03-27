@@ -358,10 +358,11 @@ def _html_flash_zprávy():
             barva = "#1a5d1a"
             pozadí = "#e8f5e9"
         bloky.append(
-            f'<div style="padding:10px 14px;margin-bottom:12px;border-radius:6px;'
-            f'border:1px solid {barva};background:{pozadí};color:#222;">{t}</div>'
+            f'<div class="flash-msg" style="position:relative;padding:10px 36px 10px 14px;margin-bottom:12px;border-radius:6px;'
+            f'border:1px solid {barva};background:{pozadí};color:#222;">'
+            f'<button type="button" class="flash-close" aria-label="Zavřít">×</button>{t}</div>'
         )
-    return '<div style="max-width:1280px;margin:0 auto 16px;padding:0 20px;">' + "".join(bloky) + "</div>"
+    return '<div class="flash-wrap" style="max-width:1280px;margin:0 auto 16px;padding:0 20px;">' + "".join(bloky) + "</div>"
 
 
 def _view_state():
@@ -621,10 +622,10 @@ def detail(id):
 
         if action == "set_rezim":
             r = request.form.get("rezim") or "seznam"
-            if r not in ("seznam", "komise"):
+            if r not in ("seznam", "komise", "nastaveni"):
                 r = "seznam"
             session[SESSION_REZIM_PREFIX + str(id)] = r
-            if r == "komise" and session.get(SESSION_EDIT_PREFIX + str(id), True):
+            if r == "komise" and session.get(SESSION_EDIT_PREFIX + str(id), False):
                 kk = SESSION_KOMISE_PREFIX + str(id)
                 if session.get(kk, 1) == -1:
                     session[kk] = 1
@@ -632,9 +633,41 @@ def detail(id):
             conn.close()
             return redirect(red)
 
+        if action == "set_pocet_komisi":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            raw_pk = request.form.get("pocet_komisi") or "3"
+            try:
+                pk = int(raw_pk)
+            except ValueError:
+                pk = 3
+            pk = max(1, min(10, pk))
+            conn.execute(
+                "UPDATE degustace SET pocet_komisi = ? WHERE id = ?",
+                (pk, id),
+            )
+            conn.commit()
+            _komise_generovat_prirazeni(conn, id, pk)
+            kk = SESSION_KOMISE_PREFIX + str(id)
+            raw_k = session.get(kk, 1)
+            if raw_k in (-1, "-1", "vse"):
+                pass
+            else:
+                try:
+                    ki = int(raw_k)
+                    if ki > pk:
+                        session[kk] = pk
+                except (TypeError, ValueError):
+                    session[kk] = 1
+            session.modified = True
+            flash("Počet komisí byl uložen a přiřazení vzorků bylo přepočítáno.", "success")
+            conn.close()
+            return redirect(red)
+
         if action == "set_komise":
             k = request.form.get("komise") or "1"
-            edit_now = session.get(SESSION_EDIT_PREFIX + str(id), True)
+            edit_now = session.get(SESSION_EDIT_PREFIX + str(id), False)
             if k == "vse" and not edit_now:
                 session[SESSION_KOMISE_PREFIX + str(id)] = -1
             else:
@@ -647,7 +680,7 @@ def detail(id):
             return redirect(red)
 
         if action == "porotci_uloz":
-            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "komise":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") not in ("komise", "nastaveni"):
                 conn.close()
                 return redirect(red)
             try:
@@ -833,9 +866,9 @@ def detail(id):
     sort_dir = vs["dir"]
     q_raw = vs["q"]
 
-    edit_mode = session.get(SESSION_EDIT_PREFIX + str(id), True)
+    edit_mode = session.get(SESSION_EDIT_PREFIX + str(id), False)
     rezim = session.get(SESSION_REZIM_PREFIX + str(id), "seznam")
-    if rezim not in ("seznam", "komise"):
+    if rezim not in ("seznam", "komise", "nastaveni"):
         rezim = "seznam"
 
     vzorky_o = list(vzorky)
@@ -864,7 +897,7 @@ def detail(id):
             vzorky_f = _filter_vzorky(vzorky, q_raw)
             vzorky_sorted = _sort_vzorky(vzorky_f, sort_key, sort_dir)
             poradi_map = _poradi_podle_bodu(vzorky)
-    else:
+    elif rezim == "komise":
         if edit_mode:
             k_eff = 1 if komise_sel == -1 else komise_sel
             k_eff = max(1, min(n_kom, k_eff))
@@ -876,6 +909,7 @@ def detail(id):
                 vzorky_komise_tab = [v for v in vzorky_o if int(v["komise_cislo"] or 0) == komise_sel]
 
     flash_html = _html_flash_zprávy()
+    ma_vzorky = len(vzorky_o) > 0
 
     ph = _preserve_hidden(sort_key, sort_dir, q_raw)
 
@@ -892,6 +926,8 @@ def detail(id):
     datum_cz = format_datum_cz(degustace["datum"])
     if rezim == "seznam":
         title_rezim_suffix = "Seznam vzorků"
+    elif rezim == "nastaveni":
+        title_rezim_suffix = "Nastavení"
     else:
         title_rezim_suffix = (
             "Komise · Vše" if komise_sel == -1 else f"Komise · č. {komise_sel}"
@@ -900,9 +936,22 @@ def detail(id):
     tisk_html = ""
     komise_select_html = ""
     if rezim == "komise":
-        tisk_html = (
-            f'<a class="btn btn-primary btn-sm" href="/tisk/{id}" target="_blank">Tisk pro komise</a>'
-        )
+        rozdeleni_tisk = _komise_prirazeni_existuje(vzorky_o)
+        if rozdeleni_tisk:
+            tisk_html = f"""
+            <div class="tisk-panel-wrap">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-tisk-toggle">Tisk pro komise</button>
+                <div id="tisk-panel" class="tisk-panel">
+                    <p style="margin:0 0 8px;font-size:13px;color:var(--text-muted);">Rozdělení vzorků do komisí už existuje.</p>
+                    <div class="tisk-panel-actions">
+                        <a class="btn btn-primary btn-sm" href="/tisk/{id}?mode=use" target="_blank">Použít existující rozdělení</a>
+                        <a class="btn btn-sm" href="/tisk/{id}?mode=regen" target="_blank">Přegenerovat a tisknout</a>
+                    </div>
+                </div>
+            </div>
+            """
+        else:
+            tisk_html = f'<a class="btn btn-primary btn-sm" href="/tisk/{id}" target="_blank">Tisk pro komise</a>'
         k_for_select = 1 if (edit_mode and komise_sel == -1) else komise_sel
         if edit_mode:
             k_for_select = max(1, min(n_kom, k_for_select if k_for_select != -1 else 1))
@@ -927,39 +976,16 @@ def detail(id):
             </form>
         """
 
-    controls_sub = ""
+    seznam_tools_row_html = ""
     if rezim == "seznam":
-        if edit_mode:
-            controls_sub = f"""
-            <div class="controls-sub">
-                <div class="import-help-row">
-                    <form id="form-import" method="post" enctype="multipart/form-data" class="import-row">
-                        <input type="hidden" name="action" value="import">
-                        {ph}
-                        <input type="file" name="soubor" id="input-import-file" class="visually-hidden"
-                            accept=".csv,.txt,.tsv,text/csv,text/plain"
-                            onchange="if(this.files.length)this.form.submit()">
-                        <label for="input-import-file" class="btn">Import dat ze souboru</label>
-                    </form>
-                    <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
-                </div>
-                <div id="help-panel" class="help-panel">
-                    <p><strong>Filtrování</strong> (režim Zobrazení): slova oddělte mezerou. Řádek musí obsahovat
-                    <em>všechna</em> slova kdykoli v řádku (AND).</p>
-                    <p><strong>Import:</strong> tabulka z Excelu (tabulátory), CSV nebo středníky. Sloupce: č.v. (ignoruje se),
-                    Jméno, Adresa, Odrůda, Přívlastek, Rok, Body (volitelně). Číslo vzorku vždy přidělí aplikace. Stejná
-                    kombinace Jméno + Odrůda + Přívlastek + Rok jako u již uloženého vzorku nebo dvakrát v souboru → řádek se přeskočí.</p>
-                </div>
-            </div>
-            """
-        else:
+        filter_row = ""
+        if not edit_mode:
             zrusit_f = ""
             if q_raw:
                 href_clear = _build_degustace_url(id, sort_key, sort_dir, "")
                 zrusit_f = f'<a class="btn btn-ghost" href="{href_clear}">Zrušit filtr</a>'
-            controls_sub = f"""
-            <div class="controls-sub">
-                <form method="get" action="/degustace/{id}" class="filter-row" role="search">
+            filter_row = f"""
+                <form method="get" action="/degustace/{id}" class="filter-row filter-row-tools" role="search">
                     <input type="hidden" name="sort" value="{escape(sort_key)}">
                     <input type="hidden" name="dir" value="{escape(sort_dir)}">
                     <label for="filtr-q" class="filter-label">Hledat</label>
@@ -968,8 +994,49 @@ def detail(id):
                     <button class="btn" type="submit">Použít filtr</button>
                     {zrusit_f}
                 </form>
+            """
+        seznam_tools_row_html = f"""
+            <div class="chrome-row-tools">
+                <div class="chrome-row-tools-left">
+                    <a class="link-back tools-back-link" href="/">← Zpět na degustace</a>
+                </div>
+                <div class="chrome-row-tools-center">{filter_row}</div>
+                <div class="chrome-row-tools-right">
+                    <div class="import-help-row import-help-row-chrome">
+                        <form id="form-import" method="post" enctype="multipart/form-data" class="import-row">
+                            <input type="hidden" name="action" value="import">
+                            {ph}
+                            <input type="file" name="soubor" id="input-import-file" class="visually-hidden"
+                                accept=".csv,.txt,.tsv,text/csv,text/plain"
+                                onchange="if(this.files.length)window.importSouborPotvrdit(this);">
+                            <label for="input-import-file" class="btn">Import dat ze souboru</label>
+                        </form>
+                        <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
+                    </div>
+                    <div id="help-panel" class="help-panel">
+                        <p><strong>Filtrování</strong> (režim Zobrazení): slova oddělte mezerou. Řádek musí obsahovat
+                        <em>všechna</em> slova kdykoli v řádku (AND).</p>
+                        <p><strong>Import:</strong> tabulka z Excelu (tabulátory), CSV nebo středníky. Sloupce: č.v. (ignoruje se),
+                        Jméno, Adresa, Odrůda, Přívlastek, Rok, Body (volitelně). Číslo vzorku vždy přidělí aplikace. Stejná
+                        kombinace Jméno + Odrůda + Přívlastek + Rok jako u již uloženého vzorku nebo dvakrát v souboru → řádek se přeskočí.</p>
+                    </div>
+                </div>
             </div>
             """
+
+    opt_seznam = " selected" if rezim == "seznam" else ""
+    opt_komise = " selected" if rezim == "komise" else ""
+    opt_nastaveni = " selected" if rezim == "nastaveni" else ""
+
+    pk_edit = degustace["pocet_komisi"]
+    if pk_edit is None:
+        pk_edit = n_kom
+    else:
+        try:
+            pk_edit = int(pk_edit)
+        except (TypeError, ValueError):
+            pk_edit = n_kom
+    pk_edit = max(1, min(10, pk_edit))
 
     html = f"""<!DOCTYPE html>
     <html lang="cs">
@@ -1032,6 +1099,169 @@ def detail(id):
                 grid-template-columns: minmax(0, 1fr) auto;
                 gap: 12px 24px;
                 align-items: start;
+            }}
+            .chrome-row1 {{
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+                gap: 12px 16px;
+                align-items: flex-start;
+            }}
+            .title-left {{ justify-self: start; min-width: 0; }}
+            .title-center {{
+                justify-self: center;
+                align-self: flex-start;
+                text-align: center;
+                font-size: 1.22rem;
+                font-weight: 700;
+                color: var(--accent);
+                letter-spacing: -0.02em;
+                padding: 0 8px;
+                line-height: 1.25;
+            }}
+            .title-right {{
+                justify-self: end;
+                align-self: flex-start;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 8px;
+            }}
+            .title-right-top {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: flex-start;
+                justify-content: flex-end;
+                gap: 10px;
+            }}
+            .chrome-row-tools {{
+                display: grid;
+                grid-template-columns: 1fr auto 1fr;
+                align-items: start;
+                gap: 8px 16px;
+                width: 100%;
+                padding: 2px 0 8px;
+                box-sizing: border-box;
+            }}
+            .chrome-row-tools-left {{
+                min-width: 0;
+                display: flex;
+                align-items: center;
+            }}
+            .tools-back-link {{
+                margin: 0;
+                white-space: nowrap;
+            }}
+            .chrome-row-tools-center {{
+                justify-self: center;
+                grid-column: 2;
+                min-width: 0;
+            }}
+            .chrome-row-tools-center .filter-row-tools {{
+                justify-content: center;
+                margin: 0;
+            }}
+            .chrome-row-tools-right {{
+                justify-self: end;
+                grid-column: 3;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 6px;
+                min-width: 0;
+            }}
+            .import-help-row-chrome {{
+                justify-content: flex-end;
+            }}
+            .form-rezim-select {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 8px;
+                margin: 0;
+            }}
+            .edit-switch-form {{
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin: 0;
+            }}
+            .switch-label {{
+                font-size: 13px;
+                color: var(--text-muted);
+                white-space: nowrap;
+            }}
+            .switch-track {{
+                position: relative;
+                width: 44px;
+                height: 26px;
+                border-radius: 13px;
+                border: 1px solid var(--border-strong);
+                background: #d8dce2;
+                padding: 3px;
+                cursor: pointer;
+                flex-shrink: 0;
+                transition: background 0.15s ease, border-color 0.15s ease;
+            }}
+            .switch-track.is-on {{
+                background: var(--accent);
+                border-color: var(--accent);
+            }}
+            .switch-knob {{
+                display: block;
+                width: 18px;
+                height: 18px;
+                border-radius: 50%;
+                background: #fff;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+                transition: transform 0.15s ease;
+            }}
+            .switch-track.is-on .switch-knob {{
+                transform: translateX(18px);
+            }}
+            .flash-close {{
+                position: absolute;
+                top: 6px;
+                right: 8px;
+                border: none;
+                background: transparent;
+                font-size: 20px;
+                line-height: 1;
+                cursor: pointer;
+                color: inherit;
+                opacity: 0.55;
+                padding: 2px 6px;
+            }}
+            .flash-close:hover {{ opacity: 1; }}
+            .komise-panel-inline {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: flex-start;
+                justify-content: flex-end;
+                gap: 8px;
+            }}
+            .tisk-panel-wrap {{
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 6px;
+            }}
+            .tisk-panel {{
+                display: none;
+                max-width: 360px;
+                padding: 10px 12px;
+                background: var(--surface);
+                border: 1px solid var(--border-strong);
+                border-radius: var(--radius-sm);
+                font-size: 13px;
+                text-align: left;
+                box-shadow: var(--shadow-md);
+            }}
+            .tisk-panel.is-open {{ display: block; }}
+            .tisk-panel-actions {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: center;
             }}
             .title-block h1.deg-nazev {{
                 margin: 0 0 6px 0;
@@ -1165,8 +1395,8 @@ def detail(id):
                 gap: 8px;
             }}
             .filter-row input[type="search"] {{
-                min-width: 180px;
-                max-width: 360px;
+                min-width: 225px;
+                max-width: 450px;
                 padding: 8px 10px;
                 border: 1px solid #ccc;
                 border-radius: 6px;
@@ -1506,55 +1736,64 @@ def detail(id):
                 font-weight: bold;
                 white-space: nowrap;
             }}
+            .settings-panel {{
+                padding: 12px 18px 18px;
+                color: var(--text);
+            }}
+            .settings-panel h2 {{
+                margin: 0 0 10px 0;
+                font-size: 1rem;
+                font-weight: 600;
+                color: var(--text);
+            }}
+            .settings-block {{
+                margin-bottom: 20px;
+            }}
+            .settings-row {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
         </style>
     </head>
-    <body>
+    <body data-ma-vzorky="{'1' if ma_vzorky else '0'}">
         <div class="fixed-chrome" id="fixed-chrome">
             <div class="fixed-chrome-inner">
                 {flash_html}
-                <div class="top-grid">
-                    <div class="title-block">
-                        <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span><span class="deg-title-sep">·</span><span class="deg-title-rezim">{escape(title_rezim_suffix)}</span></h1>
+                <div class="chrome-row1">
+                    <div class="title-left title-block">
+                        <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
                         <div class="datum">{escape(datum_cz)}</div>
-                        <a class="link-back" href="/">← Zpět na degustace</a>
                     </div>
-                    <div class="controls-block">
-                        <div class="controls-toggles">
-                            <div class="mode-wrap" title="Úpravy vs. prohlížení">
-                                <form method="post" style="display:inline;">
-                                    <input type="hidden" name="action" value="set_edit">
-                                    <input type="hidden" name="edit" value="1">
-                                    {ph}
-                                    <button type="submit" class="{'active' if edit_mode else ''}">Editace</button>
-                                </form>
-                                <form method="post" style="display:inline;">
-                                    <input type="hidden" name="action" value="set_edit">
-                                    <input type="hidden" name="edit" value="0">
-                                    {ph}
-                                    <button type="submit" class="{'active' if not edit_mode else ''}">Zobrazení</button>
-                                </form>
-                            </div>
-                            <div class="mode-wrap" title="Seznam vzorků vs. hodnocení komise">
-                                <form method="post" style="display:inline;">
-                                    <input type="hidden" name="action" value="set_rezim">
-                                    <input type="hidden" name="rezim" value="seznam">
-                                    {ph}
-                                    <button type="submit" class="{'active' if rezim == 'seznam' else ''}">Seznam vzorků</button>
-                                </form>
-                                <form method="post" style="display:inline;">
-                                    <input type="hidden" name="action" value="set_rezim">
-                                    <input type="hidden" name="rezim" value="komise">
-                                    {ph}
-                                    <button type="submit" class="{'active' if rezim == 'komise' else ''}">Komise</button>
-                                </form>
-                            </div>
+                    <div class="title-center">{escape(title_rezim_suffix)}</div>
+                    <div class="title-right">
+                        <div class="title-right-top">
+                            <form method="post" class="edit-switch-form">
+                                <input type="hidden" name="action" value="set_edit">
+                                <input type="hidden" name="edit" value="{'0' if edit_mode else '1'}">
+                                {ph}
+                                <span class="switch-label">{'Úpravy' if edit_mode else 'Prohlížení'}</span>
+                                <button type="submit" class="switch-track{' is-on' if edit_mode else ''}" title="Přepnout režim úprav" aria-label="Přepnout režim úprav">
+                                    <span class="switch-knob"></span>
+                                </button>
+                            </form>
+                            <form method="post" class="form-rezim-select">
+                                <input type="hidden" name="action" value="set_rezim">
+                                {ph}
+                                <label class="filter-label" for="sel-rezim">Sekce</label>
+                                <select name="rezim" id="sel-rezim" class="select-komise" onchange="this.form.submit()">
+                                    <option value="seznam"{opt_seznam}>Seznam vzorků</option>
+                                    <option value="komise"{opt_komise}>Komise</option>
+                                    <option value="nastaveni"{opt_nastaveni}>Nastavení</option>
+                                </select>
+                            </form>
+                            {('<div class="komise-panel-inline">' + tisk_html + komise_select_html + '</div>') if rezim == 'komise' else ''}
                         </div>
-                        <div class="komise-panel-right">
-                            {('<div class="controls-row" style="justify-content:flex-end;gap:8px;">' + komise_select_html + tisk_html + '</div>') if rezim == 'komise' else ''}
-                        </div>
-                        {controls_sub}
                     </div>
                 </div>
+                {seznam_tools_row_html}
             </div>
         </div>
 
@@ -1572,7 +1811,44 @@ def detail(id):
     html += """        <div class="table-panel">
     """
 
-    if rezim == "komise":
+    if rezim == "nastaveni":
+        html += '<div class="settings-panel">'
+        html += '<div class="settings-block"><h2>Počet komisí</h2>'
+        if edit_mode:
+            html += f"""
+            <form method="post" class="settings-row">
+                <input type="hidden" name="action" value="set_pocet_komisi">
+                {ph}
+                <label class="filter-label" for="inp-pocet-komisi">Počet</label>
+                <input id="inp-pocet-komisi" type="number" name="pocet_komisi" min="1" max="10" value="{pk_edit}"
+                    style="width:5rem;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                <button class="btn btn-sm btn-primary" type="submit">Uložit</button>
+            </form>
+            """
+        else:
+            html += f'<p style="margin:0;">Aktuálně <strong>{pk_edit}</strong> komisí.</p>'
+        html += "</div>"
+        html += '<div class="settings-block"><h2>Porotci / komisaři</h2>'
+        html += '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">Jedno pole na komisi; jména oddělte čárkami.</p>'
+        for k in range(1, n_kom + 1):
+            cur_jm = porotci_map.get(k) or ""
+            if edit_mode:
+                html += f"""
+                <form method="post" class="settings-row" style="align-items:flex-start;">
+                    <input type="hidden" name="action" value="porotci_uloz">
+                    <input type="hidden" name="komise_cislo" value="{k}">
+                    {ph}
+                    <label class="filter-label" for="inp-por-set-{k}" style="padding-top:8px;">Komise č.{k}</label>
+                    <input id="inp-por-set-{k}" type="text" name="jmena" value="{escape(cur_jm)}"
+                        placeholder="Např. Novák, Svobodová, …" autocomplete="off"
+                        style="flex:1;min-width:220px;max-width:100%;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                    <button class="btn btn-sm" type="submit">Uložit</button>
+                </form>
+                """
+            else:
+                html += f'<p style="margin:8px 0 12px;"><strong>Komise č.{k}:</strong> {escape(cur_jm) if cur_jm else "—"}</p>'
+        html += "</div></div>"
+    elif rezim == "komise":
 
         def _fmt_komise_dilci(x):
             if x is None:
@@ -1715,7 +1991,7 @@ def detail(id):
                     <p style="margin:0;"><strong>Porotci komise č.{komise_sel}:</strong> {escape(jm) if jm else "—"}</p>
                 </div>
                 """
-    else:
+    elif rezim == "seznam":
         html += """
             <table class="data-grid">
                 <thead>
@@ -1828,6 +2104,40 @@ def detail(id):
                     syncChromeHeight();
                 }});
             }}
+            document.querySelectorAll('.flash-close').forEach(function (btn) {{
+                btn.addEventListener('click', function () {{
+                    var el = btn.closest('.flash-msg');
+                    if (el) el.remove();
+                    syncChromeHeight();
+                }});
+            }});
+            window.importSouborPotvrdit = function (inp) {{
+                var ma = document.body.getAttribute('data-ma-vzorky') === '1';
+                if (ma && !confirm('V degustaci už jsou vzorky. Pokračovat v importu?')) {{
+                    inp.value = '';
+                    return;
+                }}
+                inp.form.submit();
+            }};
+            var btnTisk = document.getElementById('btn-tisk-toggle');
+            var panelTisk = document.getElementById('tisk-panel');
+            if (btnTisk && panelTisk) {{
+                btnTisk.addEventListener('click', function () {{
+                    panelTisk.classList.toggle('is-open');
+                    syncChromeHeight();
+                }});
+            }}
+            if (panelTisk) {{
+                panelTisk.addEventListener('click', function (ev) {{
+                    var t = ev.target;
+                    if (!t || !t.closest) return;
+                    var link = t.closest('a');
+                    if (link && link.closest('.tisk-panel-actions')) {{
+                        panelTisk.classList.remove('is-open');
+                        syncChromeHeight();
+                    }}
+                }});
+            }}
             var sp = new URLSearchParams(location.search);
             var fb = sp.get('fb');
             if (fb) {{
@@ -1869,32 +2179,7 @@ def tisk(id):
     rozdeleni_existuje = _komise_prirazeni_existuje(vzorky)
 
     if mode not in ("use", "regen"):
-        if rozdeleni_existuje:
-            conn.close()
-            return f"""
-            <html><head><meta charset="utf-8"><title>Tisk pro komise</title>
-            <style>
-              body {{ font-family: Arial, sans-serif; max-width: 980px; margin: 30px auto; padding: 0 16px; color:#222; background:#fff; }}
-              .box {{ border:1px solid #ddd; border-radius:10px; padding:18px; background:#fff; }}
-              .row {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }}
-              a.btn {{ display:inline-block; padding:10px 14px; border:1px solid #bbb; border-radius:8px; text-decoration:none; color:#222; background:#f8f8f8; }}
-              a.btn:hover {{ background:#f0f0f0; }}
-              a.btn-primary {{ background:#3d5c35; color:#fff; border-color:#3d5c35; }}
-              a.btn-primary:hover {{ background:#324a2c; }}
-              .muted {{ color:#555; font-size:13px; }}
-            </style></head><body>
-              <div class="box">
-                <h2 style="margin:0 0 6px 0;">Tisk pro komise</h2>
-                <div class="muted">Degustace: <strong>{escape(degustace["nazev"])}</strong> ({escape(format_datum_cz(degustace["datum"]))})</div>
-                <p class="muted" style="margin-top:10px;">Rozdělení vzorků do komisí už existuje. Co chceš udělat?</p>
-                <div class="row">
-                  <a class="btn btn-primary" href="/tisk/{id}?mode=use" target="_blank">Použít existující rozdělení</a>
-                  <a class="btn" href="/tisk/{id}?mode=regen" target="_blank">Přegenerovat rozdělení a tisknout</a>
-                </div>
-                <p class="muted" style="margin-top:14px;">Pozn.: Přegenerování přepíše přiřazení komisí u všech vzorků.</p>
-              </div>
-            </body></html>
-            """
+        # Volba je na stránce degustace (panel); přímý odkaz použije stávající rozdělení.
         mode = "use"
 
     if mode == "regen" or not rozdeleni_existuje:
