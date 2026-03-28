@@ -1,4 +1,15 @@
-from flask import Flask, request, redirect, flash, get_flashed_messages, session, jsonify
+from flask import (
+    Flask,
+    request,
+    redirect,
+    flash,
+    get_flashed_messages,
+    session,
+    jsonify,
+    url_for,
+    send_from_directory,
+    abort,
+)
 from markupsafe import escape
 from urllib.parse import urlencode, quote
 from db import get_connection
@@ -12,6 +23,21 @@ import hmac
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-nahradit-pro-produkci")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+
+@app.route("/assets/degus_logo.png")
+def degus_logo():
+    base = os.path.dirname(os.path.abspath(__file__))
+    for sub in ("static", "assets"):
+        path = os.path.join(base, sub, "degus_logo.png")
+        if os.path.isfile(path):
+            return send_from_directory(
+                os.path.join(base, sub),
+                "degus_logo.png",
+                mimetype="image/png",
+            )
+    abort(404)
+
 
 SESSION_EDIT_PREFIX = "edit_deg_"
 SESSION_REZIM_PREFIX = "rezim_deg_"
@@ -465,6 +491,115 @@ def _decode_bytes(raw):
     return None
 
 
+def _vystavovatele_import_z_textu(conn, text_v):
+    """Import vystavovatelů z CSV textu; stejná logika jako vystavovatel_import_csv. Vrací (n_ins, n_up)."""
+    text_v = (text_v or "").lstrip("\ufeff")
+    if not text_v.strip():
+        return 0, 0
+    fio = io.StringIO(text_v)
+    first_v = fio.readline()
+    fio.seek(0)
+    delim_v = _detect_delimiter(first_v)
+    reader_v = csv.reader(fio, delimiter=delim_v)
+    rows_v = list(reader_v)
+    if not rows_v:
+        return 0, 0
+    h0 = [(c or "").strip().casefold() for c in rows_v[0]]
+    start_i = 1 if (h0 and h0[0] in ("nazev", "název", "jméno", "jmeno", "vystavovatel")) else 0
+    exist_rows = conn.execute(
+        "SELECT id, nazev FROM vystavovatele",
+    ).fetchall()
+    by_key = {}
+    for er in exist_rows:
+        k = (er["nazev"] or "").strip().casefold()
+        if k:
+            by_key[k] = int(er["id"])
+    n_ins = 0
+    n_up = 0
+    for rv in rows_v[start_i:]:
+        if not rv:
+            continue
+        nz = (rv[0] if len(rv) > 0 else "").strip()
+        if not nz:
+            continue
+        ad = (rv[1] if len(rv) > 1 else "").strip() or None
+        wb = (rv[2] if len(rv) > 2 else "").strip() or None
+        mb = (rv[3] if len(rv) > 3 else "").strip() or None
+        em = (rv[4] if len(rv) > 4 else "").strip() or None
+        k = nz.casefold()
+        if k in by_key:
+            conn.execute(
+                """
+                UPDATE vystavovatele
+                SET nazev = ?, adresa = ?, web = ?, mobil = ?, mail = ?
+                WHERE id = ?
+                """,
+                (nz, ad, wb, mb, em, by_key[k]),
+            )
+            n_up += 1
+        else:
+            conn.execute(
+                "INSERT INTO vystavovatele (nazev, adresa, web, mobil, mail) VALUES (?, ?, ?, ?, ?)",
+                (nz, ad, wb, mb, em),
+            )
+            by_key[k] = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            n_ins += 1
+    return n_ins, n_up
+
+
+def _odrudy_import_z_textu(conn, text_o):
+    """Import odrůd z CSV textu; stejná logika jako odruda_import_csv. Vrací (n_ins, n_up)."""
+    text_o = (text_o or "").lstrip("\ufeff")
+    if not text_o.strip():
+        return 0, 0
+    fio_o = io.StringIO(text_o)
+    first_o = fio_o.readline()
+    fio_o.seek(0)
+    delim_o = _detect_delimiter(first_o)
+    reader_o = csv.reader(fio_o, delimiter=delim_o)
+    rows_o = list(reader_o)
+    if not rows_o:
+        return 0, 0
+    h0o = [(c or "").strip().casefold() for c in rows_o[0]]
+    start_io = 1 if (
+        h0o
+        and h0o[0]
+        in (
+            "odruda_short",
+            "krátký",
+            "short",
+            "odrůda",
+            "odruda",
+        )
+    ) else 0
+    n_ins = 0
+    n_up = 0
+    for ro in rows_o[start_io:]:
+        if not ro:
+            continue
+        sh = (ro[0] if len(ro) > 0 else "").strip().upper()
+        if not sh:
+            continue
+        lg = (ro[1] if len(ro) > 1 else "").strip() or None
+        ex = conn.execute(
+            "SELECT id FROM odrudy WHERE odruda_short = ?",
+            (sh,),
+        ).fetchone()
+        if ex:
+            conn.execute(
+                "UPDATE odrudy SET odruda_long = ? WHERE id = ?",
+                (lg, int(ex["id"])),
+            )
+            n_up += 1
+        else:
+            conn.execute(
+                "INSERT INTO odrudy (odruda_short, odruda_long) VALUES (?, ?)",
+                (sh, lg),
+            )
+            n_ins += 1
+    return n_ins, n_up
+
+
 def _vzorek_import_klic(nazev, odruda, privlastek, rocnik):
     return (
         (nazev or "").strip().casefold(),
@@ -808,45 +943,66 @@ def home():
 
     conn.close()
 
-    html = """
+    logo_url = url_for("degus_logo")
+    html = f"""
     <html>
     <head>
-        <title>Degustace vín</title>
+        <title>Správa a vyhodnocení bodovaných degustací</title>
         <style>
-            body {
+            body {{
                 font-family: Arial, sans-serif;
                 max-width: 1100px;
                 margin: 30px auto;
                 padding: 0 20px;
                 color: #222;
                 background: #f7f7f7;
-            }
-            .box {
+            }}
+            .box {{
                 border: 1px solid #d9d9d9;
                 border-radius: 8px;
                 padding: 18px;
                 margin-bottom: 20px;
                 background: white;
-            }
-            h1, h2 {
+            }}
+            h1, h2 {{
                 margin-bottom: 10px;
-            }
-            input, button {
+            }}
+            .home-title-row {{
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                flex-wrap: wrap;
+            }}
+            .home-title-row .app-logo {{
+                height: 3.4375rem;
+                width: auto;
+                max-height: 3.75rem;
+                object-fit: contain;
+                flex-shrink: 0;
+            }}
+            .home-title-row span {{
+                font-size: 1.5rem;
+                font-weight: bold;
+            }}
+            input, button {{
                 padding: 8px 10px;
                 margin: 4px 0;
                 font-size: 14px;
-            }
-            button {
+            }}
+            button {{
                 cursor: pointer;
-            }
-            .menu-button {
+            }}
+            .menu-button {{
                 min-width: 320px;
                 text-align: left;
-            }
+            }}
         </style>
     </head>
     <body>
-        <h1>Degustace vín - správa a vyhodnocení bodovaných degustací</h1>
+        <h1 class="home-title-row">
+            <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="150" height="60" decoding="async">
+            <span>Správa a vyhodnocení bodovaných degustací</span>
+        </h1>
 
         <div class="box">
             <h2>Nová degustace</h2>
@@ -1042,10 +1198,21 @@ def detail(id):
                 conn.close()
                 flash("Import DEMO je dostupný v režimu Úpravy.", "error")
                 return redirect(red)
-            demo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input", "demo.csv")
+            _app_dir = os.path.dirname(os.path.abspath(__file__))
+            demo_path = os.path.join(_app_dir, "assets", "demo.csv")
+            vin_path = os.path.join(_app_dir, "assets", "demo_vin.csv")
+            odr_path = os.path.join(_app_dir, "assets", "demo_odr.csv")
             if not os.path.isfile(demo_path):
                 conn.close()
-                flash("Soubor input/demo.csv nebyl nalezen.", "error")
+                flash("Soubor assets/demo.csv nebyl nalezen.", "error")
+                return redirect(red)
+            if not os.path.isfile(vin_path):
+                conn.close()
+                flash("Soubor assets/demo_vin.csv nebyl nalezen.", "error")
+                return redirect(red)
+            if not os.path.isfile(odr_path):
+                conn.close()
+                flash("Soubor assets/demo_odr.csv nebyl nalezen.", "error")
                 return redirect(red)
             with open(demo_path, "r", encoding="utf-8-sig") as f:
                 demo_text = f.read()
@@ -1075,8 +1242,17 @@ def detail(id):
                 ).fetchone()["c"]
                 pk_d = _degustace_pocet_komisi(deg_demo, int(vz_n or 0))
                 _komise_generovat_prirazeni(conn, demo_id, pk_d)
+                with open(vin_path, "r", encoding="utf-8-sig") as f:
+                    vin_text = f.read()
+                with open(odr_path, "r", encoding="utf-8-sig") as f:
+                    odr_text = f.read()
+                n_vi, n_vu = _vystavovatele_import_z_textu(conn, vin_text)
+                n_oi, n_ou = _odrudy_import_z_textu(conn, odr_text)
+                conn.commit()
                 conn.close()
                 zpr = f'Import DEMO: načteno vzorků {result["imported"]}.'
+                zpr += f" Vystavovatelé: vloženo {n_vi}, aktualizováno {n_vu}."
+                zpr += f" Odrůdy: vloženo {n_oi}, aktualizováno {n_ou}."
                 skip = result.get("skipped") or []
                 if skip:
                     zpr += " Přeskočeno: " + "; ".join(skip[:5])
@@ -1161,6 +1337,20 @@ def detail(id):
             conn.close()
             return redirect(red)
 
+        if action == "vystavovatele_smaz_vse":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            if not session.get(SESSION_EDIT_PREFIX + str(id), False):
+                conn.close()
+                flash("Hromadné mazání je dostupné v režimu Úpravy.", "error")
+                return redirect(red)
+            conn.execute("DELETE FROM vystavovatele")
+            conn.commit()
+            flash("Všichni vystavovatelé byli smazáni.", "success")
+            conn.close()
+            return redirect(red)
+
         if action == "vystavovatel_import_csv":
             if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
                 conn.close()
@@ -1180,56 +1370,7 @@ def detail(id):
                 conn.close()
                 flash("Soubor se nepodařilo přečíst (kódování).", "error")
                 return redirect(red)
-            fio = io.StringIO(text_v.lstrip("\ufeff"))
-            first_v = fio.readline()
-            fio.seek(0)
-            delim_v = _detect_delimiter(first_v)
-            reader_v = csv.reader(fio, delimiter=delim_v)
-            rows_v = list(reader_v)
-            if not rows_v:
-                conn.close()
-                flash("Soubor je prázdný.", "error")
-                return redirect(red)
-            h0 = [(c or "").strip().casefold() for c in rows_v[0]]
-            start_i = 1 if (h0 and h0[0] in ("nazev", "název", "jméno", "jmeno", "vystavovatel")) else 0
-            exist_rows = conn.execute(
-                "SELECT id, nazev FROM vystavovatele",
-            ).fetchall()
-            by_key = {}
-            for er in exist_rows:
-                k = (er["nazev"] or "").strip().casefold()
-                if k:
-                    by_key[k] = int(er["id"])
-            n_ins = 0
-            n_up = 0
-            for rv in rows_v[start_i:]:
-                if not rv:
-                    continue
-                nz = (rv[0] if len(rv) > 0 else "").strip()
-                if not nz:
-                    continue
-                ad = (rv[1] if len(rv) > 1 else "").strip() or None
-                wb = (rv[2] if len(rv) > 2 else "").strip() or None
-                mb = (rv[3] if len(rv) > 3 else "").strip() or None
-                em = (rv[4] if len(rv) > 4 else "").strip() or None
-                k = nz.casefold()
-                if k in by_key:
-                    conn.execute(
-                        """
-                        UPDATE vystavovatele
-                        SET nazev = ?, adresa = ?, web = ?, mobil = ?, mail = ?
-                        WHERE id = ?
-                        """,
-                        (nz, ad, wb, mb, em, by_key[k]),
-                    )
-                    n_up += 1
-                else:
-                    conn.execute(
-                        "INSERT INTO vystavovatele (nazev, adresa, web, mobil, mail) VALUES (?, ?, ?, ?, ?)",
-                        (nz, ad, wb, mb, em),
-                    )
-                    by_key[k] = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-                    n_ins += 1
+            n_ins, n_up = _vystavovatele_import_z_textu(conn, text_v)
             conn.commit()
             conn.close()
             if n_ins or n_up:
@@ -1318,6 +1459,21 @@ def detail(id):
             conn.close()
             return redirect(red)
 
+        if action == "odrudy_smaz_vse":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            if not session.get(SESSION_EDIT_PREFIX + str(id), False):
+                conn.close()
+                flash("Hromadné mazání je dostupné v režimu Úpravy.", "error")
+                return redirect(red)
+            conn.execute("UPDATE vzorky SET odruda_id = NULL WHERE odruda_id IS NOT NULL")
+            conn.execute("DELETE FROM odrudy")
+            conn.commit()
+            flash("Všechny odrůdy byly smazány (vazby u vzorků zrušeny).", "success")
+            conn.close()
+            return redirect(red)
+
         if action == "odruda_import_csv":
             if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
                 conn.close()
@@ -1337,53 +1493,7 @@ def detail(id):
                 conn.close()
                 flash("Soubor se nepodařilo přečíst (kódování).", "error")
                 return redirect(red)
-            fio_o = io.StringIO(text_o.lstrip("\ufeff"))
-            first_o = fio_o.readline()
-            fio_o.seek(0)
-            delim_o = _detect_delimiter(first_o)
-            reader_o = csv.reader(fio_o, delimiter=delim_o)
-            rows_o = list(reader_o)
-            if not rows_o:
-                conn.close()
-                flash("Soubor je prázdný.", "error")
-                return redirect(red)
-            h0o = [(c or "").strip().casefold() for c in rows_o[0]]
-            start_io = 1 if (
-                h0o
-                and h0o[0]
-                in (
-                    "odruda_short",
-                    "krátký",
-                    "short",
-                    "odrůda",
-                    "odruda",
-                )
-            ) else 0
-            n_ins = 0
-            n_up = 0
-            for ro in rows_o[start_io:]:
-                if not ro:
-                    continue
-                sh = (ro[0] if len(ro) > 0 else "").strip().upper()
-                if not sh:
-                    continue
-                lg = (ro[1] if len(ro) > 1 else "").strip() or None
-                ex = conn.execute(
-                    "SELECT id FROM odrudy WHERE odruda_short = ?",
-                    (sh,),
-                ).fetchone()
-                if ex:
-                    conn.execute(
-                        "UPDATE odrudy SET odruda_long = ? WHERE id = ?",
-                        (lg, int(ex["id"])),
-                    )
-                    n_up += 1
-                else:
-                    conn.execute(
-                        "INSERT INTO odrudy (odruda_short, odruda_long) VALUES (?, ?)",
-                        (sh, lg),
-                    )
-                    n_ins += 1
+            n_ins, n_up = _odrudy_import_z_textu(conn, text_o)
             conn.commit()
             conn.close()
             if n_ins or n_up:
@@ -2002,6 +2112,7 @@ def detail(id):
             pk_edit = n_kom
     pk_edit = max(1, min(10, pk_edit))
 
+    logo_url = url_for("degus_logo")
     html = f"""<!DOCTYPE html>
     <html lang="cs">
     <head>
@@ -2083,13 +2194,33 @@ def detail(id):
                 gap: 6px 10px;
                 align-items: center;
             }}
-            .chrome-b-left {{
+            .chrome-b-left.title-block {{
                 justify-self: start;
                 min-width: 0;
                 display: flex;
                 flex-wrap: wrap;
-                align-items: baseline;
-                gap: 4px 12px;
+                align-items: center;
+                gap: 10px 12px;
+            }}
+            .chrome-logo-link {{
+                flex-shrink: 0;
+                line-height: 0;
+                display: flex;
+                align-items: center;
+            }}
+            .chrome-logo-link .app-logo-chrome {{
+                height: 3.25rem;
+                width: auto;
+                max-height: 3.75rem;
+                object-fit: contain;
+                display: block;
+            }}
+            .chrome-title-stack {{
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 2px;
             }}
             .chrome-b-left h1.deg-nazev {{
                 margin: 0;
@@ -2167,30 +2298,13 @@ def detail(id):
             .chrome-a-right .form-rezim-select {{
                 margin-left: 0;
             }}
-            .btn-degustace-home {{
-                display: inline-block;
-                margin: 0;
-                padding: 2px 0;
-                font-size: 13px;
-                font-weight: 600;
-                color: var(--text-muted);
-                text-decoration: none;
-                background: transparent;
-                border: none;
-                cursor: pointer;
-                font-family: inherit;
-            }}
-            .btn-degustace-home:hover {{
-                color: var(--accent);
-                text-decoration: underline;
-            }}
             .komise-body-toolbar {{
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
                 justify-content: space-between;
                 gap: 10px 16px;
-                margin: 0 8px 8px;
+                margin: 12px 8px 8px;
                 padding: 0 8px;
                 box-sizing: border-box;
             }}
@@ -2203,8 +2317,13 @@ def detail(id):
                 min-width: 0;
             }}
             .form-komise-body {{
-                margin: 0;
+                margin: 4px 0 0;
                 flex-shrink: 0;
+            }}
+            @media (max-width: 640px) {{
+                .form-komise-body {{
+                    margin-top: 6px;
+                }}
             }}
             .komise-porotci {{
                 margin: 0 0 12px;
@@ -3009,6 +3128,57 @@ def detail(id):
             select.select-odruda-upper {{
                 text-transform: uppercase;
             }}
+            .vzorek-odruda-flex {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+                min-width: 0;
+            }}
+            table.data-grid td .vzorek-odruda-flex input[type="text"] {{
+                width: auto;
+                display: inline-block;
+                flex: 1 1 5.5rem;
+                min-width: 0;
+                max-width: 12rem;
+                box-sizing: border-box;
+            }}
+            table.data-grid td .vzorek-odruda-flex select.select-komise {{
+                flex: 1 1 5.5rem;
+                min-width: 0;
+                max-width: 12rem;
+                margin-bottom: 0;
+                width: auto;
+                display: inline-block;
+            }}
+            tr.row-novy-extra td.td-vzorek-extra,
+            tr.row-edit-extra td.td-vzorek-extra {{
+                background: var(--accent-soft);
+                padding: 8px 10px;
+                vertical-align: middle;
+            }}
+            .vzorek-extra-web,
+            .vzorek-extra-pozn {{
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 4px;
+                font-size: 13px;
+                margin: 0;
+            }}
+            table.data-grid td .vzorek-extra-web input,
+            table.data-grid td .vzorek-extra-pozn input {{
+                width: 100%;
+                box-sizing: border-box;
+                padding: 6px 8px;
+                border: 1px solid var(--border-strong);
+                border-radius: 6px;
+                font: inherit;
+                display: block;
+            }}
+            table.data-grid td .vzorek-extra-web input {{
+                min-width: 0;
+            }}
             .visually-hidden {{
                 position: absolute;
                 width: 1px;
@@ -3029,9 +3199,7 @@ def detail(id):
                 {katalog_warning_html}
                 <div class="chrome-head">
                 <div class="chrome-row-a">
-                    <div class="chrome-a-left">
-                        <a class="btn-degustace-home" href="/">Degustace</a>
-                    </div>
+                    <div class="chrome-a-left" aria-hidden="true"></div>
                     <div class="chrome-a-center title-center">{escape(title_rezim_suffix)}</div>
                     <div class="chrome-a-right">
                             {('<span class="title-right-slot-edit" aria-hidden="true"></span>') if rezim == 'katalog' else ''}
@@ -3061,8 +3229,11 @@ def detail(id):
                 </div>
                 <div class="chrome-row-b">
                     <div class="chrome-b-left title-block">
-                        <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
-                        <span class="datum">{escape(datum_cz)}</span>
+                        <a href="/" class="chrome-logo-link" title="Úvodní stránka"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="150" height="60" decoding="async"></a>
+                        <div class="chrome-title-stack">
+                            <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
+                            <span class="datum">{escape(datum_cz)}</span>
+                        </div>
                     </div>
                     <div class="chrome-b-center">{chrome_b_center_html}</div>
                     <div class="chrome-b-right">{chrome_b_right_html}</div>
@@ -3133,12 +3304,14 @@ def detail(id):
         html += (
             '<p style="margin:0 0 10px;font-size:13px;color:var(--text-muted);">'
             "Pokud degustace DEMO neexistuje, založí se s datem 2. 7. 2027. "
-            "Poté se smažou všechny vzorky DEMO a znovu načte soubor <code>input/demo.csv</code>.</p>"
+            "Poté se smažou všechny vzorky DEMO a načtou se soubory "
+            "<code>assets/demo.csv</code> (vzorky), <code>assets/demo_vin.csv</code> (vystavovatelé), "
+            "<code>assets/demo_odr.csv</code> (odrůdy).</p>"
         )
         if edit_mode:
             html += f"""
             <form method="post" class="settings-row"
-                onsubmit="return window.confirm('Načíst DEMO vzorky? Stávající vzorky degustace DEMO budou přepsány.');">
+                onsubmit="return window.confirm('Načíst DEMO? Přepíšou se vzorky degustace DEMO a aktualizují se vystavovatelé a odrůdy podle assets/*.csv.');">
                 <input type="hidden" name="action" value="import_demo">
                 {ph_set}
                 <button class="btn btn-sm btn-primary" type="submit">Importovat DEMO</button>
@@ -3379,6 +3552,20 @@ def detail(id):
             """
         else:
             html += '<p style="margin:0;font-size:13px;color:var(--text-muted);">Import je dostupný v režimu Úpravy.</p>'
+        html += "</div>"
+        if edit_mode:
+            html += f"""
+            <div class="settings-block" style="margin-top:10px;">
+                <h3 style="font-size:0.95rem;margin:0 0 8px 0;">Smazat všechny vystavovatele</h3>
+                <p style="margin:0 0 8px;font-size:12px;color:var(--text-muted);">Odstraní celý seznam vystavovatelů (nezasahuje do vzorků).</p>
+                <form method="post" class="settings-row"
+                    onsubmit="return window.confirm('Opravdu smazat všechny vystavovatele?');">
+                    <input type="hidden" name="action" value="vystavovatele_smaz_vse">
+                    {ph_set}
+                    <button class="btn btn-sm btn-danger" type="submit">Smazat všechny vystavovatele</button>
+                </form>
+            </div>
+            """
         html += "</div></div>"
         html += f'<div id="set-tab-odr" class="settings-panel-tab{" is-active" if settings_tab_cur == "odr" else ""}" role="tabpanel">'
         html += '<div class="settings-block"><h2>Zobrazení názvu odrůdy</h2>'
@@ -3513,6 +3700,20 @@ def detail(id):
             """
         else:
             html += '<p style="margin:0;font-size:13px;color:var(--text-muted);">Import je dostupný v režimu Úpravy.</p>'
+        html += "</div>"
+        if edit_mode:
+            html += f"""
+            <div class="settings-block" style="margin-top:10px;">
+                <h3 style="font-size:0.95rem;margin:0 0 8px 0;">Smazat všechny odrůdy</h3>
+                <p style="margin:0 0 8px;font-size:12px;color:var(--text-muted);">Odstraní celý číselník; u vzorků se zruší vazba na odrůdu (zůstane vlastní text).</p>
+                <form method="post" class="settings-row"
+                    onsubmit="return window.confirm('Opravdu smazat všechny odrůdy? Vzorky ztratí výběr z číselníku.');">
+                    <input type="hidden" name="action" value="odrudy_smaz_vse">
+                    {ph_set}
+                    <button class="btn btn-sm btn-danger" type="submit">Smazat všechny odrůdy</button>
+                </form>
+            </div>
+            """
         html += "</div></div>"
         html += """
         <script>
@@ -3778,28 +3979,28 @@ def detail(id):
         """
 
         if edit_mode:
-            html += """
+            html += f"""
                 <tr class="row-novy-vzorek">
                     <td class="cell-novy" title="Číslo vzorku doplní systém po uložení">+</td>
                     <td><input name="nazev" form="form-pridej" autocomplete="off" placeholder="Jméno / výrobce"></td>
                     <td><input name="adresa" form="form-pridej" autocomplete="off" placeholder="Obec"></td>
-                    <td style="min-width:10rem;"><select name="odruda_id" form="form-pridej" class="select-komise select-odruda-upper" style="max-width:100%;margin-bottom:4px;">{_odruda_select_options()}</select>
-                    <input name="odruda" form="form-pridej" autocomplete="off" placeholder="Vlastní odrůda" style="width:100%;box-sizing:border-box;"></td>
+                    <td style="min-width:8rem;"><div class="vzorek-odruda-flex"><select name="odruda_id" form="form-pridej" class="select-komise select-odruda-upper">{_odruda_select_options()}</select>
+                    <input name="odruda" form="form-pridej" autocomplete="off" placeholder="Vlastní odrůda" type="text"></div></td>
                     <td><input name="privlastek" form="form-pridej" autocomplete="off" placeholder="Např. MZV"></td>
                     <td><input name="rocnik" form="form-pridej" autocomplete="off" placeholder="Ročník"></td>
                     <td><button class="btn btn-sm" type="submit" form="form-pridej">Přidat</button></td>
                 </tr>
                 <tr class="row-novy-extra">
-                    <td colspan="7" style="background:var(--accent-soft);padding:8px 10px;">
-                        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;">Web
-                                <input name="web" form="form-pridej" type="url" inputmode="url" autocomplete="off"
-                                    placeholder="https://…" style="min-width:200px;max-width:420px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></label>
-                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;">Poznámka
-                                <input name="poznamka_vzorek" form="form-pridej" type="text" autocomplete="off"
-                                    placeholder="Volitelná poznámka ke vzorku" style="min-width:200px;max-width:420px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></label>
-                        </div>
+                    <td class="td-vzorek-extra"></td>
+                    <td colspan="2" class="td-vzorek-extra">
+                        <label class="vzorek-extra-web">Web
+                            <input name="web" form="form-pridej" type="url" inputmode="url" autocomplete="off" placeholder="https://…"></label>
                     </td>
+                    <td colspan="3" class="td-vzorek-extra">
+                        <label class="vzorek-extra-pozn">Poznámka
+                            <input name="poznamka_vzorek" form="form-pridej" type="text" autocomplete="off" placeholder="Volitelná poznámka ke vzorku"></label>
+                    </td>
+                    <td class="td-vzorek-extra"></td>
                 </tr>
             """
 
@@ -3821,8 +4022,8 @@ def detail(id):
                     <td>{v["cislo"]}</td>
                     <td><input name="nazev" form="form-edit-{vid}" autocomplete="off" value="{escape(v["nazev"] or "")}"></td>
                     <td><input name="adresa" form="form-edit-{vid}" autocomplete="off" value="{escape(v["adresa"] or "")}"></td>
-                    <td style="min-width:10rem;"><select name="odruda_id" form="form-edit-{vid}" class="select-komise select-odruda-upper" style="max-width:100%;margin-bottom:4px;">{_odruda_select_options(v["odruda_id"])}</select>
-                    <input name="odruda" form="form-edit-{vid}" autocomplete="off" value="{escape(v["odruda"] or "")}" placeholder="Vlastní" style="width:100%;box-sizing:border-box;"></td>
+                    <td style="min-width:8rem;"><div class="vzorek-odruda-flex"><select name="odruda_id" form="form-edit-{vid}" class="select-komise select-odruda-upper">{_odruda_select_options(v["odruda_id"])}</select>
+                    <input name="odruda" form="form-edit-{vid}" autocomplete="off" value="{escape(v["odruda"] or "")}" placeholder="Vlastní" type="text"></div></td>
                     <td><input name="privlastek" form="form-edit-{vid}" autocomplete="off" value="{escape(v["privlastek"] or "")}"></td>
                     <td><input name="rocnik" form="form-edit-{vid}" autocomplete="off" value="{escape(v["rocnik"] or "")}"></td>
                     <td class="td-akce">
@@ -3835,16 +4036,16 @@ def detail(id):
                     </td>
                 </tr>
                 <tr class="row-edit-extra">
-                    <td colspan="7" style="background:var(--accent-soft);padding:8px 10px;">
-                        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;">Web
-                                <input name="web" form="form-edit-{vid}" type="url" inputmode="url" autocomplete="off"
-                                    placeholder="https://…" value="{w_e}" style="min-width:200px;max-width:420px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></label>
-                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;">Poznámka
-                                <input name="poznamka_vzorek" form="form-edit-{vid}" type="text" autocomplete="off"
-                                    placeholder="Poznámka ke vzorku" value="{pz_e}" style="min-width:200px;max-width:420px;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></label>
-                        </div>
+                    <td class="td-vzorek-extra"></td>
+                    <td colspan="2" class="td-vzorek-extra">
+                        <label class="vzorek-extra-web">Web
+                            <input name="web" form="form-edit-{vid}" type="url" inputmode="url" autocomplete="off" placeholder="https://…" value="{w_e}"></label>
                     </td>
+                    <td colspan="3" class="td-vzorek-extra">
+                        <label class="vzorek-extra-pozn">Poznámka
+                            <input name="poznamka_vzorek" form="form-edit-{vid}" type="text" autocomplete="off" placeholder="Poznámka ke vzorku" value="{pz_e}"></label>
+                    </td>
+                    <td class="td-vzorek-extra"></td>
                 </tr>
                     """
                 else:
