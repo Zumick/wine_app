@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, flash, get_flashed_messages, session
+from flask import Flask, request, redirect, flash, get_flashed_messages, session, jsonify
 from markupsafe import escape
 from urllib.parse import urlencode, quote
 from db import get_connection
@@ -6,6 +6,8 @@ import csv
 import io
 import os
 import json
+import secrets
+import hmac
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-nahradit-pro-produkci")
@@ -72,6 +74,13 @@ def init_db():
         conn.execute("ALTER TABLE degustace ADD COLUMN katalog_format TEXT")
     if "katalog_font_pt" not in exist_deg:
         conn.execute("ALTER TABLE degustace ADD COLUMN katalog_font_pt INTEGER")
+    if "hodnoceni_token" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN hodnoceni_token TEXT")
+    for i in range(1, 5):
+        if f"hodn_b{i}_label" not in exist_deg:
+            conn.execute(f"ALTER TABLE degustace ADD COLUMN hodn_b{i}_label TEXT")
+        if f"hodn_b{i}_max" not in exist_deg:
+            conn.execute(f"ALTER TABLE degustace ADD COLUMN hodn_b{i}_max INTEGER")
 
     cur = conn.execute("PRAGMA table_info(vzorky)")
     exist = {row[1] for row in cur.fetchall()}
@@ -113,13 +122,83 @@ def format_datum_cz(datum_raw):
 
 
 def _parse_sc_float(raw):
-    s = (raw or "").strip().replace(",", ".")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and raw != raw:
+            return None
+        return float(raw)
+    s = (str(raw) or "").strip().replace(",", ".")
     if not s:
         return None
     try:
         return float(s)
     except ValueError:
         return None
+
+
+def _hodnoceni_labels_maxes_from_deg(deg_row):
+    lb = [
+        (deg_row["hodn_b1_label"] or "").strip() or "Barva",
+        (deg_row["hodn_b2_label"] or "").strip() or "Čistota",
+        (deg_row["hodn_b3_label"] or "").strip() or "Vůně",
+        (deg_row["hodn_b4_label"] or "").strip() or "Chuť",
+    ]
+    defaults = (2, 2, 4, 12)
+    mx = []
+    for i in range(4):
+        k = f"hodn_b{i + 1}_max"
+        try:
+            v = deg_row[k]
+            if v is None:
+                mx.append(defaults[i])
+            else:
+                vi = int(v)
+                mx.append(max(1, min(100, vi)))
+        except (TypeError, ValueError):
+            mx.append(defaults[i])
+    return lb, mx
+
+
+def _hodnoceni_token_ok(stored, given):
+    if not stored or not given:
+        return False
+    try:
+        return hmac.compare_digest(str(stored), str(given))
+    except Exception:
+        return False
+
+
+def _validate_komise_partials(deg_row, bb, bc, bv, bch, require_all=False):
+    labels, maxes = _hodnoceni_labels_maxes_from_deg(deg_row)
+    vals = [bb, bc, bv, bch]
+    if require_all:
+        if any(x is None for x in vals):
+            return False, "Vyplňte všechna čtyři kritéria."
+    for i, x in enumerate(vals):
+        if x is None:
+            continue
+        try:
+            fx = float(x)
+        except (TypeError, ValueError):
+            return False, "Neplatná číselná hodnota."
+        if fx < 0 or fx > maxes[i]:
+            return False, f"Hodnota „{labels[i]}“ musí být v rozsahu 0–{maxes[i]}."
+    return True, None
+
+
+def _komise_update_vzorek_body(conn, degustace_id, vzorek_id, bb, bc, bv, bch, poz):
+    parts = [x for x in (bb, bc, bv, bch) if x is not None]
+    celkem = round(sum(parts), 1) if parts else None
+    conn.execute(
+        """
+        UPDATE vzorky SET body_barva=?, body_cistota=?, body_vune=?, body_chut=?, body=?, poznamka=?
+        WHERE id=? AND degustace_id=?
+        """,
+        (bb, bc, bv, bch, celkem, poz or None, vzorek_id, degustace_id),
+    )
 
 
 def _komise_pocet(pocet_vzorku):
@@ -215,6 +294,48 @@ def _komise_celkem_zobrazit(v):
     if not anyp:
         return ""
     return f"{round(t, 1):.1f}".replace(".", ",")
+
+
+def _vzorek_hodnoceni_payload(v):
+    def g(k):
+        if v[k] is None:
+            return None
+        return float(v[k])
+
+    return {
+        "id": int(v["id"]),
+        "cislo": v["cislo"],
+        "odruda": v["odruda"] or "",
+        "privlastek": v["privlastek"] or "",
+        "rocnik": v["rocnik"] or "",
+        "b": [g("body_barva"), g("body_cistota"), g("body_vune"), g("body_chut")],
+        "body": float(v["body"]) if v["body"] is not None else None,
+        "complete": all(
+            v[k] is not None for k in ("body_barva", "body_cistota", "body_vune", "body_chut")
+        ),
+    }
+
+
+def _hodnoceni_hotovo_pocet(vzorky_rows):
+    n = 0
+    for v in vzorky_rows:
+        if all(v[k] is not None for k in ("body_barva", "body_cistota", "body_vune", "body_chut")):
+            n += 1
+    return n
+
+
+def _html_hodnoceni_chyba(msg):
+    return f"""<!DOCTYPE html>
+<html lang="cs">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hodnocení</title>
+<style>
+body{{font-family:Arial,sans-serif;background:#f2f4f6;margin:0;padding:24px;color:#1f2933;}}
+.box{{max-width:480px;margin:40px auto;background:#fff;border:1px solid #dde2e8;border-radius:10px;padding:24px;text-align:center;}}
+</style>
+</head>
+<body><div class="box"><p style="margin:0;">{escape(msg)}</p></div></body>
+</html>"""
 
 
 def _detect_delimiter(first_line):
@@ -804,22 +925,99 @@ def detail(id):
             conn.close()
             return redirect(red)
 
+        if action == "hodnoceni_nastaveni":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            if not session.get(SESSION_EDIT_PREFIX + str(id), False):
+                conn.close()
+                return redirect(red)
+            labels = []
+            maxes = []
+            mx_def = (2, 2, 4, 12)
+            for i in range(1, 5):
+                labels.append((request.form.get(f"hodn_b{i}_label") or "").strip())
+                raw_m = (request.form.get(f"hodn_b{i}_max") or "").strip()
+                try:
+                    m = int(raw_m) if raw_m else None
+                except ValueError:
+                    m = None
+                if m is None:
+                    m = mx_def[i - 1]
+                else:
+                    m = max(1, min(100, m))
+                maxes.append(m)
+            cur_t = conn.execute(
+                "SELECT hodnoceni_token FROM degustace WHERE id=?",
+                (id,),
+            ).fetchone()
+            tok = (cur_t["hodnoceni_token"] or "").strip() if cur_t else ""
+            if not tok:
+                tok = secrets.token_urlsafe(24)
+            conn.execute(
+                """
+                UPDATE degustace SET
+                    hodn_b1_label=?, hodn_b2_label=?, hodn_b3_label=?, hodn_b4_label=?,
+                    hodn_b1_max=?, hodn_b2_max=?, hodn_b3_max=?, hodn_b4_max=?,
+                    hodnoceni_token=?
+                WHERE id=?
+                """,
+                (
+                    labels[0] or None,
+                    labels[1] or None,
+                    labels[2] or None,
+                    labels[3] or None,
+                    maxes[0],
+                    maxes[1],
+                    maxes[2],
+                    maxes[3],
+                    tok,
+                    id,
+                ),
+            )
+            conn.commit()
+            flash("Nastavení mobilního hodnocení bylo uloženo.", "success")
+            conn.close()
+            return redirect(red)
+
+        if action == "hodnoceni_token_obnovit":
+            if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "nastaveni":
+                conn.close()
+                return redirect(red)
+            if not session.get(SESSION_EDIT_PREFIX + str(id), False):
+                conn.close()
+                return redirect(red)
+            new_tok = secrets.token_urlsafe(24)
+            conn.execute(
+                "UPDATE degustace SET hodnoceni_token=? WHERE id=?",
+                (new_tok, id),
+            )
+            conn.commit()
+            flash("Odkaz pro mobilní hodnocení byl obnoven — staré QR kódy přestaly platit.", "success")
+            conn.close()
+            return redirect(red)
+
         if action == "komise_uloz":
             if session.get(SESSION_REZIM_PREFIX + str(id), "seznam") != "komise":
                 conn.close()
                 return redirect(red)
-            vid = request.form["vzorek_id"]
+            try:
+                vid = int(request.form["vzorek_id"])
+            except (KeyError, ValueError, TypeError):
+                conn.close()
+                return redirect(red)
             bb = _parse_sc_float(request.form.get("body_barva"))
             bc = _parse_sc_float(request.form.get("body_cistota"))
             bv = _parse_sc_float(request.form.get("body_vune"))
             bch = _parse_sc_float(request.form.get("body_chut"))
             poz = (request.form.get("poznamka") or "").strip()
-            parts = [x for x in (bb, bc, bv, bch) if x is not None]
-            celkem = round(sum(parts), 1) if parts else None
-            conn.execute("""
-                UPDATE vzorky SET body_barva=?, body_cistota=?, body_vune=?, body_chut=?, body=?, poznamka=?
-                WHERE id=? AND degustace_id=?
-            """, (bb, bc, bv, bch, celkem, poz or None, vid, id))
+            deg_row = conn.execute("SELECT * FROM degustace WHERE id=?", (id,)).fetchone()
+            ok, err = _validate_komise_partials(deg_row, bb, bc, bv, bch, require_all=False)
+            if not ok:
+                flash(err, "error")
+                conn.close()
+                return redirect(red)
+            _komise_update_vzorek_body(conn, id, vid, bb, bc, bv, bch, poz)
             conn.commit()
             # Fokus po uložení: další vzorek v aktuální komisi (podle pořadí cislo)
             raw_k = session.get(SESSION_KOMISE_PREFIX + str(id), 1)
@@ -836,8 +1034,7 @@ def detail(id):
             tab_ids = [r[0] for r in ids_rows]
             next_fb = None
             try:
-                vid_int = int(vid)
-                j = tab_ids.index(vid_int)
+                j = tab_ids.index(vid)
                 if j + 1 < len(tab_ids):
                     next_fb = tab_ids[j + 1]
             except (ValueError, IndexError):
@@ -2116,6 +2313,78 @@ def detail(id):
         else:
             html += f'<p style="margin:0;">TOP počet: <strong>{katalog_top_x}</strong>, formát tisku: <strong>{katalog_format}</strong>, velikost písma: <strong>{katalog_font_pt} pt</strong>.</p>'
         html += "</div>"
+        h_lb, h_mx = _hodnoceni_labels_maxes_from_deg(degustace)
+        h_tok = (degustace["hodnoceni_token"] or "").strip() if degustace["hodnoceni_token"] else ""
+        base_h = request.url_root.rstrip("/")
+        html += '<div class="settings-block"><h2>Mobilní hodnocení (komise)</h2>'
+        html += (
+            '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">'
+            "Pořadí kritérií je vždy: barva → čistota → vůně → chuť (sloupce v databázi). "
+            "Jeden tajný token na degustaci; v URL se volí číslo komise. "
+            "Po prvním uložení kritérií se token vygeneruje automaticky.</p>"
+        )
+        if edit_mode:
+            html += f"""
+            <form method="post" style="margin-bottom:10px;">
+                <input type="hidden" name="action" value="hodnoceni_nastaveni">
+                {ph}
+                <div style="display:grid;grid-template-columns:repeat(2,minmax(200px,1fr));gap:12px;width:100%;max-width:900px;">
+            """
+            map_hint = ("barva", "čistota", "vůně", "chuť")
+            for i in range(4):
+                bi = i + 1
+                html += f"""
+                    <div style="border:1px solid var(--border);border-radius:8px;padding:10px;background:#fafbfc;">
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Kritérium {bi} ({map_hint[i]})</div>
+                        <label style="font-size:12px;">Popisek</label>
+                        <input name="hodn_b{bi}_label" value="{escape(h_lb[i])}"
+                            style="width:100%;box-sizing:border-box;padding:6px 8px;margin:4px 0 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                        <label style="font-size:12px;">Maximum bodů (1–100)</label>
+                        <input type="number" name="hodn_b{bi}_max" min="1" max="100" value="{h_mx[i]}"
+                            style="width:6rem;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                    </div>
+                """
+            html += f"""
+                </div>
+                <button class="btn btn-sm btn-primary" type="submit" style="margin-top:12px;">Uložit kritéria</button>
+            </form>
+            <form method="post" style="margin-bottom:8px;">
+                <input type="hidden" name="action" value="hodnoceni_token_obnovit">
+                {ph}
+                <button class="btn btn-sm" type="submit" onclick="return confirm('Obnovit tajný odkaz? Staré QR přestanou platit.');">Obnovit tajný odkaz</button>
+            </form>
+            """
+        else:
+            html += (
+                f'<p style="margin:0 0 8px;font-size:13px;">'
+                f"{escape(h_lb[0])} (max {h_mx[0]}), {escape(h_lb[1])} ({h_mx[1]}), "
+                f"{escape(h_lb[2])} ({h_mx[2]}), {escape(h_lb[3])} ({h_mx[3]})"
+                f"</p>"
+            )
+        if h_tok:
+            html += '<div style="margin-top:10px;font-weight:600;font-size:14px;">Odkazy a QR pro komise</div>'
+            html += (
+                '<table class="data-grid" style="margin-top:8px;font-size:13px;max-width:100%;">'
+                "<thead><tr><th>Kom.</th><th>URL</th><th>QR</th></tr></thead><tbody>"
+            )
+            for k in range(1, n_kom + 1):
+                u = f"{base_h}/hodnoceni/{id}/{k}?t={quote(h_tok, safe='')}"
+                qr = f"https://api.qrserver.com/v1/create-qr-code/?size=96x96&data={quote(u, safe='')}"
+                html += f"""
+                <tr>
+                    <td style="white-space:nowrap;">č. {k}</td>
+                    <td style="word-break:break-all;"><a href="{escape(u)}" target="_blank" rel="noopener">{escape(u)}</a></td>
+                    <td style="text-align:center;"><img src="{qr}" width="96" height="96" alt="QR komise {k}"></td>
+                </tr>
+                """
+            html += "</tbody></table>"
+        else:
+            html += (
+                '<p style="margin:10px 0 0;font-size:13px;color:var(--text-muted);">'
+                "Token pro mobilní hodnocení zatím není — v režimu úprav uložte kritéria výše (token se vytvoří automaticky)."
+                "</p>"
+            )
+        html += "</div>"
         html += '<div class="settings-block"><h2>Porotci / komisaři</h2>'
         html += '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">Jedno pole na komisi; jména oddělte čárkami.</p>'
         for k in range(1, n_kom + 1):
@@ -2241,7 +2510,13 @@ def detail(id):
                 return "—"
             return format_body_hodnota(x)
 
-        html += """
+        hk_lb, hk_mx = _hodnoceni_labels_maxes_from_deg(degustace)
+        th_b1 = f"{escape(hk_lb[0])}<br>0–{hk_mx[0]}"
+        th_b2 = f"{escape(hk_lb[1])}<br>0–{hk_mx[1]}"
+        th_b3 = f"{escape(hk_lb[2])}<br>0–{hk_mx[2]}"
+        th_b4 = f"{escape(hk_lb[3])}<br>0–{hk_mx[3]}"
+
+        html += f"""
             <table class="data-grid table-komise">
                 <colgroup>
                     <col class="col-kom" />
@@ -2263,10 +2538,10 @@ def detail(id):
                     <th>odrůda</th>
                     <th>jakost</th>
                     <th>ročník</th>
-                    <th>Barva<br>0–2</th>
-                    <th>Čistota<br>0–2</th>
-                    <th>Vůně<br>0–4</th>
-                    <th>Chuť<br>0–12</th>
+                    <th>{th_b1}</th>
+                    <th>{th_b2}</th>
+                    <th>{th_b3}</th>
+                    <th>{th_b4}</th>
                     <th>celkem</th>
                     <th>poznámka</th>
                 </tr>
@@ -2305,7 +2580,7 @@ def detail(id):
                     <td><input class="in-score" type="text" inputmode="decimal" name="body_cistota" form="ksave-{vid}" value="{pv_bc}" autocomplete="off"></td>
                     <td><input class="in-score" type="text" inputmode="decimal" name="body_vune" form="ksave-{vid}" value="{pv_bv}" autocomplete="off"></td>
                     <td><input class="in-score" type="text" inputmode="decimal" name="body_chut" form="ksave-{vid}" value="{pv_bch}" autocomplete="off"></td>
-                    <td class="td-celkem">{celkem_txt}</td>
+                    <td class="td-celkem" id="kom-celkem-{vid}">{celkem_txt}</td>
                     <td class="td-pozn">
                         <div class="pozn-input-wrap">
                             <input type="text" class="pozn-input" name="poznamka" form="ksave-{vid}" value="{escape(poz_txt)}" autocomplete="off">
@@ -2576,6 +2851,49 @@ def detail(id):
                 var nu = location.pathname + (nq ? '?' + nq : '') + location.hash;
                 history.replaceState(null, '', nu);
             }}
+            function komiseParseFloat(raw) {{
+                if (raw == null) return null;
+                var s = String(raw).trim().replace(',', '.');
+                if (!s) return null;
+                var n = parseFloat(s);
+                return isNaN(n) ? null : n;
+            }}
+            function komiseCelkemFromForm(formId) {{
+                var names = ['body_barva', 'body_cistota', 'body_vune', 'body_chut'];
+                var parts = [];
+                for (var i = 0; i < names.length; i++) {{
+                    var el = document.querySelector('input[form="' + formId + '"][name="' + names[i] + '"]');
+                    var p = el ? komiseParseFloat(el.value) : null;
+                    if (p !== null) parts.push(p);
+                }}
+                if (!parts.length) return null;
+                var t = 0;
+                for (var j = 0; j < parts.length; j++) t += parts[j];
+                return Math.round(t * 10) / 10;
+            }}
+            function komiseFmtCelkem(n) {{
+                return n.toFixed(1).replace('.', ',');
+            }}
+            function komiseUpdateCelkem(formId, isInitial) {{
+                var m = formId.match(/^ksave-(\\d+)$/);
+                if (!m) return;
+                var cell = document.getElementById('kom-celkem-' + m[1]);
+                if (!cell) return;
+                var sum = komiseCelkemFromForm(formId);
+                if (sum === null && isInitial) return;
+                cell.textContent = sum === null ? '—' : komiseFmtCelkem(sum);
+            }}
+            document.querySelectorAll('form[id^="ksave-"]').forEach(function (f) {{
+                komiseUpdateCelkem(f.id, true);
+                var onInp = function () {{ komiseUpdateCelkem(f.id, false); }};
+                ['body_barva', 'body_cistota', 'body_vune', 'body_chut'].forEach(function (nm) {{
+                    var inp = document.querySelector('input[form="' + f.id + '"][name="' + nm + '"]');
+                    if (inp) {{
+                        inp.addEventListener('input', onInp);
+                        inp.addEventListener('change', onInp);
+                    }}
+                }});
+            }});
         }})();
         </script>
     </body>
@@ -2583,6 +2901,397 @@ def detail(id):
     """
 
     return html
+
+
+def _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id):
+    if not vz_all:
+        return f"""<!DOCTYPE html>
+<html lang="cs">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hodnocení</title>
+<style>
+body{{font-family:Arial,sans-serif;background:#f2f4f6;margin:0;padding:20px 14px;color:#1f2933;}}
+.box{{max-width:520px;margin:24px auto;background:#fff;border:1px solid #dde2e8;border-radius:10px;padding:20px;}}
+</style>
+</head>
+<body><div class="box">
+<p style="margin:0 0 10px;"><strong>V této komisi zatím nejsou žádné vzorky.</strong></p>
+<p style="margin:0;font-size:14px;color:#555;line-height:1.45;">Nejdřív na desktopu nechte aplikaci rozdělit vzorky do komisí
+(Nastavení → počet komisí a uložení, případně tisk pro komise). Potom zkuste QR znovu.</p>
+</div></body></html>"""
+
+    labels, maxes = _hodnoceni_labels_maxes_from_deg(deg)
+    boot = {
+        "degId": degustace_id,
+        "komise": komise_cislo,
+        "degNazev": deg["nazev"] or "",
+        "datumCz": format_datum_cz(deg["datum"]),
+        "porotci": por_txt,
+        "labels": labels,
+        "maxes": maxes,
+        "vzorky": [_vzorek_hodnoceni_payload(v) for v in vz_all],
+        "x": _hodnoceni_hotovo_pocet(vz_all),
+        "y": len(vz_all),
+        "path": f"/hodnoceni/{degustace_id}/{komise_cislo}",
+    }
+    payload = json.dumps(boot, ensure_ascii=False).replace("</", "<\\/")
+    title = escape(deg["nazev"] or "Hodnocení")
+
+    html = f"""<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hodnocení – {title}</title>
+<style>
+:root {{ --bg:#f2f4f6; --card:#fff; --text:#1f2933; --muted:#667084; --accent:#2f5e2b; --border:#dde2e8; }}
+* {{ box-sizing: border-box; }}
+body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }}
+.app {{ max-width: 520px; margin: 0 auto; min-height: 100vh; padding-bottom: 28px; }}
+.top {{ position: sticky; top: 0; z-index: 20; background: #fff; border-bottom: 1px solid var(--border);
+  padding: 12px 14px 10px; box-shadow: 0 1px 0 rgba(0,0,0,0.04); }}
+.top h1 {{ margin: 0 0 4px; font-size: 17px; line-height: 1.25; }}
+.top .meta {{ font-size: 12px; color: var(--muted); margin: 0; line-height: 1.35; }}
+.row-tools {{ display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; flex-wrap: wrap; }}
+.btn {{ border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }}
+.btn-primary {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+.btn:disabled {{ opacity: 0.45; cursor: not-allowed; }}
+.card {{ background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin: 10px 12px; padding: 14px; }}
+.cv {{ font-size: 28px; font-weight: 800; color: var(--accent); margin: 0 0 6px; }}
+.subline {{ font-size: 15px; margin: 0 0 12px; line-height: 1.35; }}
+.crit {{ margin: 12px 0; }}
+.crit-lbl {{ font-size: 13px; color: var(--muted); margin-bottom: 6px; }}
+.stepper {{ display: flex; align-items: center; gap: 10px; }}
+.stepper button {{ width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--border); background: #fff; font-size: 22px; font-weight: 700; cursor: pointer; }}
+.stepper .val {{ flex: 1; text-align: center; font-size: 22px; font-weight: 700; min-height: 44px; line-height: 44px; }}
+.nav-row {{ display: flex; gap: 10px; margin: 14px 12px 0; }}
+.nav-row button {{ flex: 1; }}
+.hint {{ font-size: 12px; color: var(--muted); margin: 10px 12px 0; line-height: 1.35; }}
+.modal-bg {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 100; padding: 16px; overflow: auto; }}
+.modal-bg.open {{ display: block; }}
+.modal {{ background: #fff; border-radius: 12px; max-width: 520px; margin: 20px auto; padding: 14px; border: 1px solid var(--border); }}
+.modal h3 {{ margin: 0 0 10px; font-size: 16px; }}
+.modal table {{ width: 100%; font-size: 12px; border-collapse: collapse; }}
+.modal th, .modal td {{ border-bottom: 1px solid #eee; padding: 6px 4px; text-align: left; }}
+.modal th {{ color: var(--muted); font-weight: 600; }}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <h1 id="hn-title">{title}</h1>
+    <p class="meta" id="hn-sub"></p>
+    <div class="row-tools">
+      <span id="hn-count" style="font-size:14px;font-weight:600;"></span>
+      <button type="button" class="btn" id="hn-check">Kontrola</button>
+    </div>
+  </div>
+  <div id="hn-main"></div>
+  <p class="hint" id="hn-hint"></p>
+  <div class="nav-row">
+    <button type="button" class="btn" id="hn-prev">« Předchozí</button>
+    <button type="button" class="btn" id="hn-next">Další »</button>
+  </div>
+</div>
+<div class="modal-bg" id="hn-modal-bg"><div class="modal">
+  <h3>Kontrola — komise</h3>
+  <div id="hn-modal-body"></div>
+  <p style="margin-top:12px;"><button type="button" class="btn btn-primary" id="hn-modal-close">Zavřít</button></p>
+</div></div>
+<script type="application/json" id="hn-boot">{payload}</script>
+"""
+
+    html += """
+<script>
+(function () {
+  var BOOT = JSON.parse(document.getElementById("hn-boot").textContent);
+  function tok() {
+    var p = new URLSearchParams(location.search);
+    return p.get("t") || "";
+  }
+  function el(id) { return document.getElementById(id); }
+  function fmtNum(n) {
+    if (n == null || n !== n) return "—";
+    var s = (Math.round(n * 10) / 10).toFixed(1);
+    return s.replace(".", ",");
+  }
+  function sumB(b) {
+    var p = [];
+    for (var i = 0; i < 4; i++) if (b[i] != null) p.push(b[i]);
+    if (p.length !== 4) return null;
+    var t = 0; for (var j = 0; j < 4; j++) t += p[j];
+    return Math.round(t * 10) / 10;
+  }
+  var VZ = JSON.parse(JSON.stringify(BOOT.vzorky));
+  var ix = 0;
+  var dirty = false;
+  var editLocked = false;
+  var overrideEdit = false;
+
+  function cur() { return VZ[ix]; }
+
+  function allFilledValid(b) {
+    var mx = BOOT.maxes;
+    for (var i = 0; i < 4; i++) {
+      if (b[i] == null) return false;
+      if (b[i] < 0 || b[i] > mx[i]) return false;
+    }
+    return true;
+  }
+
+  function syncLockState() {
+    var c = cur();
+    editLocked = !overrideEdit && c.complete === true;
+  }
+
+  function renderTop() {
+    el("hn-sub").textContent = BOOT.datumCz + " · Komise č. " + BOOT.komise + (BOOT.porotci ? " · Členové komise: " + BOOT.porotci : "");
+    el("hn-count").textContent = "Hodnoceno " + BOOT.x + " z " + BOOT.y;
+  }
+
+  function renderMain() {
+    syncLockState();
+    var c = cur();
+    var b = c.b;
+    var lockedUI = editLocked && !dirty;
+    var html = '<div class="card">';
+    html += '<p class="cv">č.v. ' + c.cislo + '</p>';
+    html += '<p class="subline">' + (c.odruda || "—") + " · " + (c.privlastek || "—") + " · " + (c.rocnik || "—") + '</p>';
+    for (var i = 0; i < 4; i++) {
+      var dis = lockedUI ? " disabled" : "";
+      var v = b[i];
+      var show = fmtNum(v);
+      html += '<div class="crit"><div class="crit-lbl">' + BOOT.labels[i] + " (max " + BOOT.maxes[i] + ')</div>';
+      html += '<div class="stepper">';
+      html += '<button type="button" class="hn-min"' + dis + ' data-i="' + i + '">−</button>';
+      html += '<div class="val" data-vi="' + i + '">' + show + '</div>';
+      html += '<button type="button" class="hn-plus"' + dis + ' data-i="' + i + '">+</button>';
+      html += '</div></div>';
+    }
+    var sm = sumB(b);
+    html += '<p style="margin:14px 0 0;font-size:16px;font-weight:700;color:var(--accent);">Celkem: ' + (sm == null ? "—" : fmtNum(sm)) + '</p>';
+    html += '</div>';
+    html += '<div class="nav-row" style="margin-top:16px;">';
+    if (lockedUI) {
+      html += '<button type="button" class="btn btn-primary" id="hn-edit" style="width:100%">Upravit</button>';
+    } else {
+      var canSave = allFilledValid(b);
+      html += '<button type="button" class="btn btn-primary" id="hn-save" style="width:100%"' + (canSave ? "" : " disabled") + '>Uložit</button>';
+    }
+    html += '</div>';
+    if (!lockedUI && !allFilledValid(b)) {
+      html += '<p class="hint" style="margin-top:8px;">Vyplňte všechna čtyři kritéria v povoleném rozsahu.</p>';
+    }
+    el("hn-main").innerHTML = html;
+    el("hn-hint").textContent = dirty ? "Máte neuložené změny u tohoto vzorku." : "";
+
+    var mins = document.querySelectorAll(".hn-min");
+    var pls = document.querySelectorAll(".hn-plus");
+    for (var a = 0; a < mins.length; a++) {
+      mins[a].onclick = function (ev) { step(parseInt(ev.target.getAttribute("data-i"), 10), -0.1); };
+    }
+    for (var b_ = 0; b_ < pls.length; b_++) {
+      pls[b_].onclick = function (ev) { step(parseInt(ev.target.getAttribute("data-i"), 10), 0.1); };
+    }
+    var es = el("hn-edit");
+    if (es) es.onclick = function () {
+      if (!confirm("Upravit již uložené hodnocení?")) return;
+      overrideEdit = true;
+      dirty = false;
+      renderMain();
+    };
+    var sv = el("hn-save");
+    if (sv) sv.onclick = save;
+  }
+
+  function step(i, delta) {
+    if (editLocked && !dirty) return;
+    var c = cur();
+    var mx = BOOT.maxes[i];
+    var v = c.b[i];
+    if (v == null) v = 0;
+    v = Math.round((v + delta) * 10) / 10;
+    if (v < 0) v = 0;
+    if (v > mx) v = mx;
+    c.b[i] = v;
+    dirty = true;
+    renderMain();
+  }
+
+  function save() {
+    var c = cur();
+    if (!allFilledValid(c.b)) return;
+    var body = { t: tok(), vzorek_id: c.id, b1: c.b[0], b2: c.b[1], b3: c.b[2], b4: c.b[3] };
+    fetch(BOOT.path + "?t=" + encodeURIComponent(tok()), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (o) {
+      if (!o.ok || !o.j.ok) { alert(o.j.error || "Uložení se nezdařilo."); return; }
+      var u = o.j.vzorek;
+      for (var k = 0; k < VZ.length; k++) if (VZ[k].id === u.id) { VZ[k] = u; break; }
+      BOOT.x = o.j.x;
+      dirty = false;
+      overrideEdit = false;
+      renderTop();
+      renderMain();
+    }).catch(function () { alert("Chyba sítě."); });
+  }
+
+  function goPrev() {
+    if (ix <= 0) return;
+    if (dirty && !confirm("Opustit vzorek s neuloženými změnami?")) return;
+    dirty = false;
+    overrideEdit = false;
+    ix--;
+    renderMain();
+    renderTop();
+  }
+  function goNext() {
+    if (ix >= VZ.length - 1) return;
+    if (dirty && !confirm("Opustit vzorek s neuloženými změnami?")) return;
+    dirty = false;
+    overrideEdit = false;
+    ix++;
+    renderMain();
+    renderTop();
+  }
+
+  function openModal() {
+    var h = '<table><thead><tr><th>č.v.</th><th>Odrůda</th><th>dílčí</th><th>celkem</th></tr></thead><tbody>';
+    for (var i = 0; i < VZ.length; i++) {
+      var r = VZ[i];
+      var parts = [];
+      for (var j = 0; j < 4; j++) parts.push(fmtNum(r.b[j]));
+      var sm = sumB(r.b);
+      h += "<tr><td>" + r.cislo + "</td><td>" + (r.odruda || "") + "</td><td>" + parts.join(" / ") + "</td><td>" + (sm == null ? "—" : fmtNum(sm)) + "</td></tr>";
+    }
+    h += "</tbody></table>";
+    el("hn-modal-body").innerHTML = h;
+    el("hn-modal-bg").classList.add("open");
+  }
+
+  el("hn-prev").onclick = goPrev;
+  el("hn-next").onclick = goNext;
+  el("hn-check").onclick = openModal;
+  el("hn-modal-close").onclick = function () { el("hn-modal-bg").classList.remove("open"); };
+  el("hn-modal-bg").onclick = function (e) { if (e.target === el("hn-modal-bg")) el("hn-modal-bg").classList.remove("open"); };
+
+  renderTop();
+  renderMain();
+})();
+</script>
+</body>
+</html>
+"""
+    return html
+
+
+@app.route("/hodnoceni/<int:degustace_id>/<int:komise_cislo>", methods=["GET", "POST"])
+def hodnoceni_komise(degustace_id, komise_cislo):
+    conn = get_connection()
+    deg = conn.execute(
+        "SELECT * FROM degustace WHERE id = ?",
+        (degustace_id,),
+    ).fetchone()
+    if not deg:
+        conn.close()
+        return _html_hodnoceni_chyba("Degustace neexistuje."), 404
+
+    n_vz = conn.execute(
+        "SELECT COUNT(*) FROM vzorky WHERE degustace_id = ?",
+        (degustace_id,),
+    ).fetchone()[0]
+    n_kom = _degustace_pocet_komisi(deg, n_vz)
+
+    if request.method == "POST":
+        data = request.get_json(silent=True)
+        if not data or not isinstance(data, dict):
+            conn.close()
+            return jsonify(ok=False, error="Očekáváno JSON."), 400
+        t = data.get("t")
+        if not _hodnoceni_token_ok(deg["hodnoceni_token"], t):
+            conn.close()
+            return jsonify(ok=False, error="Neplatný token."), 403
+        try:
+            vid = int(data.get("vzorek_id"))
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify(ok=False, error="Neplatný vzorek."), 400
+        b1 = _parse_sc_float(data.get("b1"))
+        b2 = _parse_sc_float(data.get("b2"))
+        b3 = _parse_sc_float(data.get("b3"))
+        b4 = _parse_sc_float(data.get("b4"))
+        ok, err = _validate_komise_partials(deg, b1, b2, b3, b4, require_all=True)
+        if not ok:
+            conn.close()
+            return jsonify(ok=False, error=err), 400
+        row = conn.execute(
+            "SELECT * FROM vzorky WHERE id = ? AND degustace_id = ?",
+            (vid, degustace_id),
+        ).fetchone()
+        if not row:
+            conn.close()
+            return jsonify(ok=False, error="Vzorek nenalezen."), 404
+        if int(row["komise_cislo"] or 0) != int(komise_cislo):
+            conn.close()
+            return jsonify(ok=False, error="Vzorek nepatří do této komise."), 403
+        _komise_update_vzorek_body(
+            conn,
+            degustace_id,
+            vid,
+            b1,
+            b2,
+            b3,
+            b4,
+            row["poznamka"],
+        )
+        conn.commit()
+        v_up = conn.execute("SELECT * FROM vzorky WHERE id = ?", (vid,)).fetchone()
+        vz_all = conn.execute(
+            """
+            SELECT * FROM vzorky
+            WHERE degustace_id = ? AND komise_cislo = ?
+            ORDER BY cislo
+            """,
+            (degustace_id, komise_cislo),
+        ).fetchall()
+        conn.close()
+        return jsonify(
+            ok=True,
+            vzorek=_vzorek_hodnoceni_payload(v_up),
+            x=_hodnoceni_hotovo_pocet(vz_all),
+            y=len(vz_all),
+        )
+
+    t = request.args.get("t")
+    if not _hodnoceni_token_ok(deg["hodnoceni_token"], t):
+        conn.close()
+        return _html_hodnoceni_chyba("Neplatný nebo chybějící odkaz (token)."), 403
+
+    if komise_cislo < 1 or komise_cislo > n_kom:
+        conn.close()
+        return _html_hodnoceni_chyba("Neplatné číslo komise."), 404
+
+    vz_all = conn.execute(
+        """
+        SELECT * FROM vzorky
+        WHERE degustace_id = ? AND komise_cislo = ?
+        ORDER BY cislo
+        """,
+        (degustace_id, komise_cislo),
+    ).fetchall()
+    pr = conn.execute(
+        """
+        SELECT jmena FROM komise_porotci
+        WHERE degustace_id = ? AND komise_cislo = ?
+        """,
+        (degustace_id, komise_cislo),
+    ).fetchone()
+    conn.close()
+    por_txt = (pr["jmena"] or "").strip() if pr else ""
+    return _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id)
 
 
 @app.route("/mobile-katalog/<int:id>")
