@@ -1,0 +1,57 @@
+Rozšíření:
+* Tisk pro komise
+  - parametr: počet komisí, podle kterého se spočítá kolik vzorků bude hodnotit jednotlivé komise
+  - pokud se tiskne pro daný seznam vzorků poprvé, vygenerovat nahodný seznam vín pro každou komisi, tak aby každá komise měla výběr vín napříč odrůdami a přívlasteky
+  - pokud už bude seznam pro komise vygenerovaný, tak další stisknutí tlačítka pro tisk vyvolá dotaz, zda znovu vygenerovat seznam nebo tisknout formulář z již vygenerovaným seznamem
+  - formulář bude obsahovat následující pole:pořadové číslo vzorku, odrůda, jakost, rok a prázdné kolonky pro bodové ohodnocení a poznámku
+  - hlavička a patička zůstane beze změny
+
+ * nadpisy obecně sjednotit na stránce Seznam vzorků a na stránce Komise bude nadpis stejně velký jako už je název degustace 
+  
+ * Na stránce Komise 
+  - v režimu editace je možné upravovat body a poznámku pro jednotlivé vzorky a nově přidat tlačítko pro možnost ručního přidání nového vzorku. Tento vzorek musí být nejdříve zadaný do DB v režimu seznamu vzorků 
+  - v režimu zobrazení uvádět dole pod seznamem i jména porotců, kteří hodnotí v dané komisi
+  
+ 
+ * změna úvodní stránky - před přihlášením
+ - na hoře bude nadpis Správa degustací 
+ - výzva k přihlášení
+ - input boxy pro email (uživatelské jméno) a heslo
+ - tlačítko pro přihlášení
+ - tlačítko pro změnu hesla
+ - pokud uživatel ještě neexistuje, tak se zobrazí formulář pro registraci
+    - input boxy pro email (uživatelské jméno), jméno a příjmení  a heslo
+    - tlačítko pro registraci
+    - tlačítko pro zrušení
+    - pokud uživatel již existuje, tak se zobrazí formulář pro přihlášení
+
+* změna úvodní stránky - po přihlášení
+ - nadpis bude Správa degustací + uživatelské jméno 
+ - dále budou v hlavičce tlačítka pro založení nové degustace, Nastavení, Help, tlačítko pro odhlášení
+ - pod nadpisem bude seznam degustací, ke kterým má uživatel přístup. Seznam bude vo formě velkých tlačítek / dlaždic s názvem degustace a datumem degustace (v přehledném formátu). Celé tlačítko po prokliknutí otevře degustaci.
+
+ * tlačítko nastsavení
+ - bude otevřen panel s nastaveními:
+  - Globální parametry
+    - seznam porotců s možnosti editace stávajících a založení nových
+    - seznam uživatelů s možnosti editace stávajících a založení nových. Uživatelé budou mít nasatven profil oprávnění ( EDITOR, READER)
+  - Parametry degustace - definice pro každou degustaci zvlášť
+    - status degustace (otevřená, uzavřená, archivovaná)
+    - počet komisí
+    - ke každé komisi přidělit porotce (možnost až 10 porotců do jedné komise)
+    - porotce číslo 1 bude brán jako hlavní porotce
+
+ * oprávnění obecně
+ - přidat možnost registrace nového správce jen pro WEBADMIN
+ - rozšířit datový modal - integrovat oprávnění uživatelů
+ - každá registarce uživatele musí být ověřena přes email - potvrzení odeslané na yadaný amil
+ - ID uživateůle = email
+
+ 
+ * profily oprávnění 
+ - WEBADMIN - jsem já, přístup všude, může všechno měnit 
+ - ADMIN - může založit novou degustaci, vidí a edituje jen své degustace. Nesmí mít žádný přístup ani on a ani jeho uživatelé do jiných degustací, které nezaložil. 
+ - EDITOR - má přiděleného ADMINA a může editovat vše a jen v nearchivovaných degiustacích daného podle ADMINA
+ - READER - má přiděleného ADMINA a může jen číst vše a jen v nearchivovaných degiustacích daného podle ADMINA
+ 
+  

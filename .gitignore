@@ -1,0 +1,9 @@
+__pycache__/
+.cursor/
+backup/
+log/
+tmp/
+input/
+data/
+*.db
+*.pyc
