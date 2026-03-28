@@ -2947,26 +2947,59 @@ body{{font-family:Arial,sans-serif;background:#f2f4f6;margin:0;padding:20px 14px
 :root {{ --bg:#f2f4f6; --card:#fff; --text:#1f2933; --muted:#667084; --accent:#2f5e2b; --border:#dde2e8; }}
 * {{ box-sizing: border-box; }}
 body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }}
-.app {{ max-width: 520px; margin: 0 auto; min-height: 100vh; padding-bottom: 28px; }}
+.app {{ max-width: 520px; margin: 0 auto; min-height: 100vh; padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }}
 .top {{ position: sticky; top: 0; z-index: 20; background: #fff; border-bottom: 1px solid var(--border);
-  padding: 12px 14px 10px; box-shadow: 0 1px 0 rgba(0,0,0,0.04); }}
-.top h1 {{ margin: 0 0 4px; font-size: 17px; line-height: 1.25; }}
-.top .meta {{ font-size: 12px; color: var(--muted); margin: 0; line-height: 1.35; }}
-.row-tools {{ display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; flex-wrap: wrap; }}
+  padding: 10px 12px 8px; box-shadow: 0 1px 0 rgba(0,0,0,0.04); }}
+.top-row1 {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; }}
+.top-row1 h1 {{ margin: 0; font-size: 17px; line-height: 1.25; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.btn-kontrola {{ flex-shrink: 0; padding: 6px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }}
+.top-row2 {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.3; }}
+.top-row2-right {{ font-weight: 600; color: var(--text); flex-shrink: 0; }}
 .btn {{ border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }}
 .btn-primary {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
 .btn:disabled {{ opacity: 0.45; cursor: not-allowed; }}
-.card {{ background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin: 10px 12px; padding: 14px; }}
-.cv {{ font-size: 28px; font-weight: 800; color: var(--accent); margin: 0 0 6px; }}
-.subline {{ font-size: 15px; margin: 0 0 12px; line-height: 1.35; }}
-.crit {{ margin: 12px 0; }}
-.crit-lbl {{ font-size: 13px; color: var(--muted); margin-bottom: 6px; }}
-.stepper {{ display: flex; align-items: center; gap: 10px; }}
-.stepper button {{ width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--border); background: #fff; font-size: 22px; font-weight: 700; cursor: pointer; }}
-.stepper .val {{ flex: 1; text-align: center; font-size: 22px; font-weight: 700; min-height: 44px; line-height: 44px; }}
-.nav-row {{ display: flex; gap: 10px; margin: 14px 12px 0; }}
-.nav-row button {{ flex: 1; }}
-.hint {{ font-size: 12px; color: var(--muted); margin: 10px 12px 0; line-height: 1.35; }}
+.card {{ background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin: 8px 12px; padding: 12px; }}
+.sample-row {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; }}
+.cv {{ font-size: 28px; font-weight: 800; color: var(--accent); margin: 0; flex-shrink: 0; }}
+.sample-meta {{ font-weight: 700; font-size: 15px; text-align: right; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.crit {{ margin: 10px 0 12px; }}
+.crit-lbl {{ font-size: 12px; color: var(--muted); margin-bottom: 4px; text-align: center; }}
+.range-wrap {{ width: 100%; touch-action: pan-y; padding: 2px 0; }}
+.hn-range {{
+  width: 100%; height: 28px; margin: 0; cursor: pointer;
+  -webkit-appearance: none; appearance: none; background: transparent;
+}}
+.hn-range::-webkit-slider-runnable-track {{ height: 6px; border-radius: 3px; background: #dde2e8; }}
+.hn-range::-moz-range-track {{ height: 6px; border-radius: 3px; background: #dde2e8; }}
+.hn-range::-webkit-slider-thumb {{
+  -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.2); margin-top: -8px;
+}}
+.hn-range::-moz-range-thumb {{ width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; }}
+.crit-fine {{ display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 6px; }}
+.hn-fine {{
+  min-width: 44px; min-height: 44px; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--border);
+  background: #fff; font-size: 20px; font-weight: 700; line-height: 1; cursor: pointer; padding: 0;
+}}
+.val-box {{
+  min-width: 4.5rem; text-align: center; font-size: 18px; font-weight: 700;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: #f7f8fa;
+}}
+.sum-line {{ margin: 12px 0 0; font-size: 16px; font-weight: 700; color: var(--accent); text-align: center; }}
+.hint {{ font-size: 12px; color: var(--muted); margin: 8px 12px 0; line-height: 1.35; }}
+.foot-bar {{
+  position: sticky; bottom: 0; z-index: 30; display: flex; align-items: stretch; justify-content: space-between;
+  gap: 8px; padding: 10px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(180deg, rgba(242,244,246,0.95) 0%, var(--bg) 12%); border-top: 1px solid var(--border);
+}}
+.foot-bar .foot-nav {{
+  min-width: 48px; width: 48px; min-height: 48px; border-radius: 10px; border: 1px solid var(--border);
+  background: #fff; font-size: 26px; font-weight: 700; line-height: 1; cursor: pointer; padding: 0; color: var(--text);
+}}
+.foot-mid {{ flex: 1; display: flex; justify-content: center; align-items: stretch; min-width: 0; }}
+.foot-bar .foot-save {{
+  width: 100%; max-width: 100%; min-height: 48px; border-radius: 10px; font-size: 16px; font-weight: 700;
+}}
 .modal-bg {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 100; padding: 16px; overflow: auto; }}
 .modal-bg.open {{ display: block; }}
 .modal {{ background: #fff; border-radius: 12px; max-width: 520px; margin: 20px auto; padding: 14px; border: 1px solid var(--border); }}
@@ -2979,18 +3012,24 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
 <body>
 <div class="app">
   <div class="top">
-    <h1 id="hn-title">{title}</h1>
-    <p class="meta" id="hn-sub"></p>
-    <div class="row-tools">
-      <span id="hn-count" style="font-size:14px;font-weight:600;"></span>
-      <button type="button" class="btn" id="hn-check">Kontrola</button>
+    <div class="top-row1">
+      <h1 id="hn-title">{title}</h1>
+      <button type="button" class="btn btn-kontrola" id="hn-check" aria-label="Kontrola hodnocení komise">Kontrola</button>
+    </div>
+    <div class="top-row2">
+      <span id="hn-row2-left"></span>
+      <span id="hn-count" class="top-row2-right"></span>
     </div>
   </div>
   <div id="hn-main"></div>
   <p class="hint" id="hn-hint"></p>
-  <div class="nav-row">
-    <button type="button" class="btn" id="hn-prev">« Předchozí</button>
-    <button type="button" class="btn" id="hn-next">Další »</button>
+  <div class="foot-bar" id="hn-foot">
+    <button type="button" class="foot-nav" id="hn-prev" aria-label="Předchozí vzorek">‹</button>
+    <div class="foot-mid">
+      <button type="button" class="btn btn-primary foot-save" id="hn-save">Uložit</button>
+      <button type="button" class="btn btn-primary foot-save" id="hn-edit" style="display:none">Upravit</button>
+    </div>
+    <button type="button" class="foot-nav" id="hn-next" aria-label="Další vzorek">›</button>
   </div>
 </div>
 <div class="modal-bg" id="hn-modal-bg"><div class="modal">
@@ -3010,6 +3049,10 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
     return p.get("t") || "";
   }
   function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    if (s == null) return "";
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  }
   function fmtNum(n) {
     if (n == null || n !== n) return "—";
     var s = (Math.round(n * 10) / 10).toFixed(1);
@@ -3021,6 +3064,12 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
     if (p.length !== 4) return null;
     var t = 0; for (var j = 0; j < 4; j++) t += p[j];
     return Math.round(t * 10) / 10;
+  }
+  function snap05(raw, mx) {
+    var v = Math.round(raw * 2) / 2;
+    if (v < 0) v = 0;
+    if (v > mx) v = mx;
+    return Math.round(v * 10) / 10;
   }
   var VZ = JSON.parse(JSON.stringify(BOOT.vzorky));
   var ix = 0;
@@ -3045,66 +3094,27 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
   }
 
   function renderTop() {
-    el("hn-sub").textContent = BOOT.datumCz + " · Komise č. " + BOOT.komise + (BOOT.porotci ? " · Členové komise: " + BOOT.porotci : "");
+    el("hn-row2-left").textContent = BOOT.datumCz + " · Komise č. " + BOOT.komise;
     el("hn-count").textContent = "Hodnoceno " + BOOT.x + " z " + BOOT.y;
   }
 
-  function renderMain() {
-    syncLockState();
+  function renderFooter() {
     var c = cur();
     var b = c.b;
     var lockedUI = editLocked && !dirty;
-    var html = '<div class="card">';
-    html += '<p class="cv">č.v. ' + c.cislo + '</p>';
-    html += '<p class="subline">' + (c.odruda || "—") + " · " + (c.privlastek || "—") + " · " + (c.rocnik || "—") + '</p>';
-    for (var i = 0; i < 4; i++) {
-      var dis = lockedUI ? " disabled" : "";
-      var v = b[i];
-      var show = fmtNum(v);
-      html += '<div class="crit"><div class="crit-lbl">' + BOOT.labels[i] + " (max " + BOOT.maxes[i] + ')</div>';
-      html += '<div class="stepper">';
-      html += '<button type="button" class="hn-min"' + dis + ' data-i="' + i + '">−</button>';
-      html += '<div class="val" data-vi="' + i + '">' + show + '</div>';
-      html += '<button type="button" class="hn-plus"' + dis + ' data-i="' + i + '">+</button>';
-      html += '</div></div>';
-    }
-    var sm = sumB(b);
-    html += '<p style="margin:14px 0 0;font-size:16px;font-weight:700;color:var(--accent);">Celkem: ' + (sm == null ? "—" : fmtNum(sm)) + '</p>';
-    html += '</div>';
-    html += '<div class="nav-row" style="margin-top:16px;">';
+    var saveBtn = el("hn-save");
+    var editBtn = el("hn-edit");
     if (lockedUI) {
-      html += '<button type="button" class="btn btn-primary" id="hn-edit" style="width:100%">Upravit</button>';
+      saveBtn.style.display = "none";
+      editBtn.style.display = "block";
     } else {
-      var canSave = allFilledValid(b);
-      html += '<button type="button" class="btn btn-primary" id="hn-save" style="width:100%"' + (canSave ? "" : " disabled") + '>Uložit</button>';
+      saveBtn.style.display = "block";
+      editBtn.style.display = "none";
+      saveBtn.disabled = !allFilledValid(b);
     }
-    html += '</div>';
-    if (!lockedUI && !allFilledValid(b)) {
-      html += '<p class="hint" style="margin-top:8px;">Vyplňte všechna čtyři kritéria v povoleném rozsahu.</p>';
-    }
-    el("hn-main").innerHTML = html;
-    el("hn-hint").textContent = dirty ? "Máte neuložené změny u tohoto vzorku." : "";
-
-    var mins = document.querySelectorAll(".hn-min");
-    var pls = document.querySelectorAll(".hn-plus");
-    for (var a = 0; a < mins.length; a++) {
-      mins[a].onclick = function (ev) { step(parseInt(ev.target.getAttribute("data-i"), 10), -0.1); };
-    }
-    for (var b_ = 0; b_ < pls.length; b_++) {
-      pls[b_].onclick = function (ev) { step(parseInt(ev.target.getAttribute("data-i"), 10), 0.1); };
-    }
-    var es = el("hn-edit");
-    if (es) es.onclick = function () {
-      if (!confirm("Upravit již uložené hodnocení?")) return;
-      overrideEdit = true;
-      dirty = false;
-      renderMain();
-    };
-    var sv = el("hn-save");
-    if (sv) sv.onclick = save;
   }
 
-  function step(i, delta) {
+  function stepFine(i, delta) {
     if (editLocked && !dirty) return;
     var c = cur();
     var mx = BOOT.maxes[i];
@@ -3117,6 +3127,85 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
     dirty = true;
     renderMain();
   }
+
+  function renderMain() {
+    syncLockState();
+    var c = cur();
+    var b = c.b;
+    var lockedUI = editLocked && !dirty;
+    var html = '<div class="card">';
+    html += '<div class="sample-row">';
+    html += '<span class="cv">č.v. ' + c.cislo + '</span>';
+    var meta = esc(c.odruda || "—") + " · " + esc(c.privlastek || "—") + " · " + esc(c.rocnik || "—");
+    var metaTitle = esc((c.odruda || "") + " · " + (c.privlastek || "") + " · " + (c.rocnik || ""));
+    html += '<span class="sample-meta" title="' + metaTitle + '">' + meta + '</span>';
+    html += '</div>';
+    for (var i = 0; i < 4; i++) {
+      var mx = BOOT.maxes[i];
+      var v = b[i];
+      var rv = (v == null) ? 0 : v;
+      if (rv < 0) rv = 0;
+      if (rv > mx) rv = mx;
+      var dis = lockedUI ? " disabled" : "";
+      html += '<div class="crit">';
+      html += '<div class="crit-lbl">' + esc(BOOT.labels[i]) + " (max " + mx + ')</div>';
+      html += '<div class="range-wrap">';
+      html += '<input type="range" class="hn-range" min="0" max="' + mx + '" step="0.1" value="' + rv + '" data-i="' + i + '"' + dis + ' />';
+      html += '</div>';
+      html += '<div class="crit-fine">';
+      html += '<button type="button" class="hn-fine hn-min" data-i="' + i + '"' + dis + ' aria-label="Odečíst 0,1 bodu">−</button>';
+      html += '<div class="val-box">' + ((b[i] == null) ? "—" : fmtNum(b[i])) + '</div>';
+      html += '<button type="button" class="hn-fine hn-plus" data-i="' + i + '"' + dis + ' aria-label="Přičíst 0,1 bodu">+</button>';
+      html += '</div></div>';
+    }
+    var sm = sumB(b);
+    html += '<p class="sum-line">Celkem: ' + (sm == null ? "—" : fmtNum(sm)) + '</p>';
+    html += '</div>';
+    if (!lockedUI && !allFilledValid(b)) {
+      html += '<p class="hint" style="margin:8px 12px 0;">Vyplňte všechna čtyři kritéria v povoleném rozsahu.</p>';
+    }
+    el("hn-main").innerHTML = html;
+    el("hn-hint").textContent = dirty ? "Máte neuložené změny u tohoto vzorku." : "";
+
+    var main = el("hn-main");
+    var ranges = main.querySelectorAll(".hn-range");
+    for (var ri = 0; ri < ranges.length; ri++) {
+      ranges[ri].oninput = function (ev) {
+        if (editLocked && !dirty) return;
+        var ii = parseInt(ev.target.getAttribute("data-i"), 10);
+        var mx2 = BOOT.maxes[ii];
+        var vv = parseFloat(ev.target.value);
+        cur().b[ii] = snap05(vv, mx2);
+        dirty = true;
+        renderMain();
+      };
+    }
+    var mins = main.querySelectorAll(".hn-min");
+    var pls = main.querySelectorAll(".hn-plus");
+    for (var a = 0; a < mins.length; a++) {
+      mins[a].onclick = function (ev) {
+        var t = ev.target.closest("button");
+        if (!t) return;
+        stepFine(parseInt(t.getAttribute("data-i"), 10), -0.1);
+      };
+    }
+    for (var b_ = 0; b_ < pls.length; b_++) {
+      pls[b_].onclick = function (ev) {
+        var t = ev.target.closest("button");
+        if (!t) return;
+        stepFine(parseInt(t.getAttribute("data-i"), 10), 0.1);
+      };
+    }
+    renderFooter();
+  }
+
+  el("hn-edit").onclick = function () {
+    if (!confirm("Upravit již uložené hodnocení?")) return;
+    overrideEdit = true;
+    dirty = false;
+    renderMain();
+  };
+  el("hn-save").onclick = save;
 
   function save() {
     var c = cur();
