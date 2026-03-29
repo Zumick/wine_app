@@ -974,9 +974,9 @@ def home():
                 flex-wrap: wrap;
             }}
             .home-title-row .app-logo {{
-                height: 3.4375rem;
+                height: 6.4453125rem;
                 width: auto;
-                max-height: 3.75rem;
+                max-height: 7.03125rem;
                 object-fit: contain;
                 flex-shrink: 0;
             }}
@@ -984,39 +984,107 @@ def home():
                 font-size: 1.5rem;
                 font-weight: bold;
             }}
-            input, button {{
+            input {{
                 padding: 8px 10px;
                 margin: 4px 0;
                 font-size: 14px;
             }}
             button {{
+                padding: 10px 10px;
+                margin: 4px 0;
+                font-size: 14px;
                 cursor: pointer;
             }}
+            .form-nova-deg {{
+                display: grid;
+                grid-template-columns: minmax(160px, 360px) auto auto;
+                gap: 10px 14px;
+                align-items: end;
+                justify-content: start;
+                width: fit-content;
+                max-width: 100%;
+            }}
+            .form-nova-deg .fn-field {{
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                min-width: 0;
+            }}
+            .form-nova-deg .fn-field > span:first-child {{
+                font-size: 13px;
+                color: #444;
+            }}
+            .form-nova-deg .fn-nazev {{
+                min-width: 160px;
+                width: 100%;
+                max-width: 360px;
+                box-sizing: border-box;
+            }}
+            .form-nova-deg .fn-datum {{
+                min-width: 140px;
+                width: auto;
+                box-sizing: border-box;
+            }}
+            .form-nova-deg .fn-actions-label {{
+                font-size: 13px;
+                line-height: 1.2;
+                min-height: 1.2em;
+                visibility: hidden;
+                user-select: none;
+            }}
+            .form-nova-deg .fn-actions button {{
+                margin: 0;
+                white-space: nowrap;
+            }}
+            @media (max-width: 640px) {{
+                .form-nova-deg {{
+                    grid-template-columns: 1fr;
+                    width: 100%;
+                }}
+            }}
+            .degustace-grid {{
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 10px 12px;
+            }}
+            @media (max-width: 900px) {{
+                .degustace-grid {{ grid-template-columns: repeat(2, 1fr); }}
+            }}
+            @media (max-width: 520px) {{
+                .degustace-grid {{ grid-template-columns: 1fr; }}
+            }}
+            .degustace-grid form {{
+                margin: 0;
+                min-width: 0;
+            }}
             .menu-button {{
-                min-width: 320px;
+                width: 100%;
+                min-width: 0;
+                box-sizing: border-box;
                 text-align: left;
             }}
         </style>
     </head>
     <body>
         <h1 class="home-title-row">
-            <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="150" height="60" decoding="async">
+            <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
             <span>Správa a vyhodnocení bodovaných degustací</span>
         </h1>
 
         <div class="box">
             <h2>Nová degustace</h2>
-            <form method="post">
+            <form method="post" class="form-nova-deg">
                 <input type="hidden" name="action" value="nova_degustace">
-                <div>
-                    Název degustace<br>
-                    <input name="nazev" required style="width: 320px;">
-                </div>
-                <div>
-                    Datum<br>
-                    <input type="date" name="datum" required>
-                </div>
-                <div>
+                <label class="fn-field">
+                    <span>Název degustace</span>
+                    <input name="nazev" required class="fn-nazev" autocomplete="off">
+                </label>
+                <label class="fn-field">
+                    <span>Datum</span>
+                    <input type="date" name="datum" required class="fn-datum">
+                </label>
+                <div class="fn-field fn-actions">
+                    <span class="fn-actions-label" aria-hidden="true">.</span>
                     <button type="submit">Vytvořit degustaci</button>
                 </div>
             </form>
@@ -1027,14 +1095,16 @@ def home():
     """
 
     if degustace:
+        html += '<div class="degustace-grid">'
         for d in degustace:
             html += f"""
-            <form method="post" style="margin:6px 0;">
+            <form method="post">
                 <input type="hidden" name="action" value="vyber">
                 <input type="hidden" name="degustace_id" value="{d['id']}">
                 <button class="menu-button" type="submit">{d['nazev']} ({d['datum']})</button>
             </form>
             """
+        html += "</div>"
     else:
         html += "<p>Zatím není založena žádná degustace.</p>"
 
@@ -2209,9 +2279,9 @@ def detail(id):
                 align-items: center;
             }}
             .chrome-logo-link .app-logo-chrome {{
-                height: 3.25rem;
+                height: 5.078125rem;
                 width: auto;
-                max-height: 3.75rem;
+                max-height: 5.859375rem;
                 object-fit: contain;
                 display: block;
             }}
@@ -3229,7 +3299,7 @@ def detail(id):
                 </div>
                 <div class="chrome-row-b">
                     <div class="chrome-b-left title-block">
-                        <a href="/" class="chrome-logo-link" title="Úvodní stránka"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="150" height="60" decoding="async"></a>
+                        <a href="/" class="chrome-logo-link" title="Úvodní stránka"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="235" height="94" decoding="async"></a>
                         <div class="chrome-title-stack">
                             <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
                             <span class="datum">{escape(datum_cz)}</span>
@@ -4953,6 +5023,7 @@ def mobile_katalog(id):
     payload_abbr = json.dumps(abbr_entries, ensure_ascii=False).replace("</", "<\\/")
     payload_porotci = json.dumps(porotci_entries, ensure_ascii=False).replace("</", "<\\/")
     title = escape(degustace["nazev"] or "E-katalog")
+    ek_logo_url = url_for("degus_logo")
 
     html = f"""<!DOCTYPE html>
     <html lang="cs">
@@ -4978,13 +5049,16 @@ def mobile_katalog(id):
                 border: 1px solid var(--border); border-radius: 10px;
                 box-shadow: 0 1px 0 rgba(0,0,0,0.03);
             }}
-            .top-head {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }}
-            .title {{ font-size: 18px; font-weight: 700; margin: 0; }}
-            .btn-info {{ border:1px solid var(--border); background:#fff; border-radius:8px; padding:7px 10px; font-size:12px; font-weight:600; }}
-            .tabs {{ display: flex; gap: 6px; margin-bottom: 8px; }}
+            .top-head {{ display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; min-width: 0; }}
+            .top-head-main {{ display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }}
+            .ek-logo-link {{ flex-shrink: 0; line-height: 0; display: flex; align-items: center; }}
+            .ek-logo {{ height: 2.25rem; width: auto; max-height: 2.6rem; object-fit: contain; display: block; }}
+            .title {{ font-size: 18px; font-weight: 700; margin: 0; min-width: 0; flex: 1; line-height: 1.25; }}
+            .btn-info {{ border:1px solid var(--border); background:#fff; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:600; flex-shrink: 0; white-space: nowrap; }}
+            .tabs {{ display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }}
             .tab {{
-                flex: 1; border: 1px solid var(--border); background:#fff; border-radius: 8px; padding: 8px 6px;
-                font-size: 13px; font-weight: 600;
+                flex: 1; min-width: 4.5rem; border: 1px solid var(--border); background:#fff; border-radius: 8px; padding: 8px 4px;
+                font-size: 12px; font-weight: 600;
             }}
             .tab.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
             .search {{ width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 14px; }}
@@ -5110,12 +5184,16 @@ def mobile_katalog(id):
     <div class="app">
         <div class="top">
             <div class="top-head">
-                <h1 class="title">{title}</h1>
-                <button id="btn-info" class="btn-info" type="button">Info o degustaci</button>
+                <div class="top-head-main">
+                    <a href="/" class="ek-logo-link" title="Úvodní stránka"><img src="{escape(ek_logo_url)}" class="ek-logo" alt="" width="120" height="48" decoding="async"></a>
+                    <h1 class="title">{title}</h1>
+                </div>
+                <button id="btn-info" class="btn-info" type="button" title="Info o degustaci">Info</button>
             </div>
             <div class="tabs">
                 <button class="tab active" data-mode="all">Vše</button>
                 <button class="tab" data-mode="odrudy">Odrůdy</button>
+                <button class="tab" data-mode="vinarstvi">Vinařství</button>
                 <button class="tab" data-mode="fav">Oblíbené</button>
             </div>
             <input id="q" class="search" type="search" placeholder="Hledat: vystavovatel, odrůda, ročník...">
@@ -5299,7 +5377,14 @@ def mobile_katalog(id):
       const grp = {{}};
       for (const v of base) {{ (grp[v.odruda || "Nezařazeno"] ||= []).push(v); }}
       const keys = Object.keys(grp).sort((a,b)=>a.localeCompare(b,"cs"));
-      return keys.map(k => `<div class="section-title">${{k}} (${{grp[k].length}})</div>${{renderTable(grp[k], true)}}`).join("");
+      return keys.map(k => `<div class="section-title">${{escHtml(k)}} (${{grp[k].length}})</div>${{renderTable(grp[k], true)}}`).join("");
+    }}
+    function renderByVinarstvi(base) {{
+      if (!base.length) return `<div class="empty">Žádné položky pro aktuální filtr.</div>`;
+      const grp = {{}};
+      for (const v of base) {{ (grp[v.vystavovatel || "Nezařazeno"] ||= []).push(v); }}
+      const keys = Object.keys(grp).sort((a,b)=>a.localeCompare(b,"cs"));
+      return keys.map(k => `<div class="section-title">${{escHtml(k)}} (${{grp[k].length}})</div>${{renderTable(grp[k], true)}}`).join("");
     }}
     function bindActions() {{
       listEl.querySelectorAll("[data-fav]").forEach(btn => btn.addEventListener("click", (e) => {{ e.preventDefault(); e.stopPropagation(); toggleFav(Number(btn.dataset.fav)); }}));
@@ -5341,6 +5426,7 @@ def mobile_katalog(id):
         }}
 
         if (state.mode === "odrudy") listEl.innerHTML = renderByOdrudy(base);
+        else if (state.mode === "vinarstvi") listEl.innerHTML = renderByVinarstvi(base);
         else if (state.mode === "fav") listEl.innerHTML = base.length ? renderTable(base, false) : `<div class="empty">Zatím nemáte žádné oblíbené vzorky.</div>`;
         else listEl.innerHTML = renderTable(base, false);
 
