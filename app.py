@@ -1081,7 +1081,9 @@ def home():
     </head>
     <body>
         <h1 class="home-title-row">
+            <a href="https://degus.cz">
             <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
+            </a>
             <span>Správa a vyhodnocení bodovaných degustací</span>
         </h1>
 
@@ -3650,7 +3652,7 @@ def detail(id):
                 </form>
             </div>
             """
-        html += "</div></div>"
+        html += "</div>"
         html += f'<div id="set-tab-odr" class="settings-panel-tab{" is-active" if settings_tab_cur == "odr" else ""}" role="tabpanel">'
         html += '<div class="settings-block"><h2>Zobrazení názvu odrůdy</h2>'
         html += (
