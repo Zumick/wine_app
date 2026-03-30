@@ -47,6 +47,20 @@ SESSION_SETTINGS_TAB_PREFIX = "settings_tab_deg_"
 SETTINGS_TAB_IDS = ("deg", "hodn", "kom", "kat", "vys", "odr")
 _KOMISE_VELIKOST = 30
 
+# Limity délky textů (aplikace/UI)
+_LEN_WEB = 500
+_LEN_POZN_VZOREK = 500
+_LEN_WEB_VYST = 500
+
+
+def _limit_str(raw, max_len):
+    """Ořezání textu po .strip(); prázdný vstup -> None."""
+    t = (raw or "").strip()
+    if not t:
+        return None
+    return t[:max_len] if max_len is not None else t
+
+
 _KOMISE_EXTRA_COLS = (
     ("body_barva", "REAL"),
     ("body_cistota", "REAL"),
@@ -523,7 +537,7 @@ def _vystavovatele_import_z_textu(conn, text_v):
         if not nz:
             continue
         ad = (rv[1] if len(rv) > 1 else "").strip() or None
-        wb = (rv[2] if len(rv) > 2 else "").strip() or None
+        wb = _limit_str(rv[2] if len(rv) > 2 else None, _LEN_WEB_VYST)
         mb = (rv[3] if len(rv) > 3 else "").strip() or None
         em = (rv[4] if len(rv) > 4 else "").strip() or None
         k = nz.casefold()
@@ -894,7 +908,7 @@ def _vystav_polozky_z_formu():
     return (
         (request.form.get("nazev") or "").strip(),
         (request.form.get("adresa") or "").strip() or None,
-        (request.form.get("web") or "").strip() or None,
+        _limit_str(request.form.get("web"), _LEN_WEB_VYST),
         (request.form.get("mobil") or "").strip() or None,
         (request.form.get("mail") or "").strip() or None,
     )
@@ -1627,8 +1641,8 @@ def detail(id):
                 odruda_id, odruda = _odruda_z_vzorek_formu(conn)
                 privlastek = (request.form.get("privlastek") or "").strip()
                 rocnik = (request.form.get("rocnik") or "").strip()
-                web_v = (request.form.get("web") or "").strip() or None
-                pzv = (request.form.get("poznamka_vzorek") or "").strip() or None
+                web_v = _limit_str(request.form.get("web"), _LEN_WEB)
+                pzv = _limit_str(request.form.get("poznamka_vzorek"), _LEN_POZN_VZOREK)
                 conn.execute(
                     """
                     UPDATE vzorky
@@ -1812,8 +1826,8 @@ def detail(id):
                 odruda_id,
                 request.form.get("privlastek", "").strip(),
                 request.form.get("rocnik", "").strip(),
-                (request.form.get("web") or "").strip() or None,
-                (request.form.get("poznamka_vzorek") or "").strip() or None,
+                _limit_str(request.form.get("web"), _LEN_WEB),
+                _limit_str(request.form.get("poznamka_vzorek"), _LEN_POZN_VZOREK),
             ))
             conn.commit()
             conn.close()
@@ -3537,7 +3551,7 @@ def detail(id):
                         <input id="vys-a-{vid}" type="text" name="adresa" form="vys-u-{vid}" value="{escape(vr['adresa'] or '')}"
                             style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></td>
                         <td><label class="visually-hidden" for="vys-w-{vid}">Web</label>
-                        <input id="vys-w-{vid}" type="text" name="web" form="vys-u-{vid}" value="{escape(vr['web'] or '')}"
+                        <input id="vys-w-{vid}" type="text" name="web" form="vys-u-{vid}" value="{escape(vr['web'] or '')}" maxlength="500"
                             style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></td>
                         <td><label class="visually-hidden" for="vys-m-{vid}">Mobil</label>
                         <input id="vys-m-{vid}" type="text" name="mobil" form="vys-u-{vid}" value="{escape(vr['mobil'] or '')}"
@@ -3595,7 +3609,7 @@ def detail(id):
                 <input id="vys-new-a" type="text" name="adresa"
                     style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></div>
                 <div style="flex:1;min-width:100px;"><label class="filter-label" for="vys-new-w">Web</label>
-                <input id="vys-new-w" type="text" name="web"
+                <input id="vys-new-w" type="text" name="web" maxlength="500"
                     style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;"></div>
                 <div style="flex:0 0 110px;"><label class="filter-label" for="vys-new-m">Mobil</label>
                 <input id="vys-new-m" type="text" name="mobil"
@@ -4064,11 +4078,11 @@ def detail(id):
                     <td class="td-vzorek-extra"></td>
                     <td colspan="2" class="td-vzorek-extra">
                         <label class="vzorek-extra-web">Web
-                            <input name="web" form="form-pridej" type="url" inputmode="url" autocomplete="off" placeholder="https://…"></label>
+                            <input name="web" form="form-pridej" type="url" inputmode="url" autocomplete="off" placeholder="https://…" maxlength="500"></label>
                     </td>
                     <td colspan="3" class="td-vzorek-extra">
                         <label class="vzorek-extra-pozn">Poznámka
-                            <input name="poznamka_vzorek" form="form-pridej" type="text" autocomplete="off" placeholder="Volitelná poznámka ke vzorku"></label>
+                            <input name="poznamka_vzorek" form="form-pridej" type="text" autocomplete="off" placeholder="Volitelná poznámka ke vzorku" maxlength="500"></label>
                     </td>
                     <td class="td-vzorek-extra"></td>
                 </tr>
@@ -4109,11 +4123,11 @@ def detail(id):
                     <td class="td-vzorek-extra"></td>
                     <td colspan="2" class="td-vzorek-extra">
                         <label class="vzorek-extra-web">Web
-                            <input name="web" form="form-edit-{vid}" type="url" inputmode="url" autocomplete="off" placeholder="https://…" value="{w_e}"></label>
+                            <input name="web" form="form-edit-{vid}" type="url" inputmode="url" autocomplete="off" placeholder="https://…" value="{w_e}" maxlength="500"></label>
                     </td>
                     <td colspan="3" class="td-vzorek-extra">
                         <label class="vzorek-extra-pozn">Poznámka
-                            <input name="poznamka_vzorek" form="form-edit-{vid}" type="text" autocomplete="off" placeholder="Poznámka ke vzorku" value="{pz_e}"></label>
+                            <input name="poznamka_vzorek" form="form-edit-{vid}" type="text" autocomplete="off" placeholder="Poznámka ke vzorku" value="{pz_e}" maxlength="500"></label>
                     </td>
                     <td class="td-vzorek-extra"></td>
                 </tr>

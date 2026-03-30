@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Degustace vín – výsledky za pár minut místo několika hodin</title>
+  <meta name="description" content="Software pro organizátory degustací vín. Import vzorků, tisk bodovacích tabulek a automatické výsledky bez přepisování do Excelu.">
+  <style>
+    :root {
+      --bg: #fcfaf7;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --primary: #7a1f2b;
+      --primary-dark: #5d1720;
+      --accent: #f4eee8;
+      --ok: #14532d;
+      --shadow: 0 10px 30px rgba(0,0,0,0.06);
+      --radius: 18px;
+      --container: 1080px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+.logo {
+  height: 100px;
+  display: block;
+}
+    .container {
+      width: min(var(--container), calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(252,250,247,0.94);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid rgba(229,231,235,0.9);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 68px;
+    }
+
+    .brand {
+      font-size: 1.1rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .nav a {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 0 18px;
+      border-radius: 12px;
+      font-weight: 700;
+      transition: 0.18s ease;
+      border: 1px solid transparent;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-dark);
+    }
+
+    .btn-secondary {
+      background: #fff;
+      border-color: var(--line);
+      color: var(--text);
+    }
+
+    .hero {
+      padding: 56px 0 34px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      margin-bottom: 14px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--primary-dark);
+      font-size: 0.92rem;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      line-height: 1.06;
+      letter-spacing: -0.02em;
+    }
+
+    .hero p.lead {
+      margin: 0 0 20px;
+      font-size: 1.12rem;
+      color: #374151;
+      max-width: 700px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .trust {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .hero-card,
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card {
+      padding: 22px;
+    }
+
+    .hero-card h3 {
+      margin: 0 0 14px;
+      font-size: 1.05rem;
+    }
+
+    .hero-list {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .hero-list li {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      color: #374151;
+    }
+
+    .hero-list strong {
+      display: block;
+      color: var(--text);
+    }
+
+    section {
+      padding: 26px 0;
+    }
+
+    .section-head {
+      max-width: 760px;
+      margin-bottom: 18px;
+    }
+
+    .section-head h2 {
+      margin: 0 0 8px;
+      font-size: clamp(1.55rem, 2.4vw, 2.2rem);
+      line-height: 1.15;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .benefits {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      padding: 22px;
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 1.05rem;
+    }
+
+    .card p {
+      margin: 0;
+      color: #4b5563;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .step-number {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--primary-dark);
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .demo {
+      padding-top: 34px;
+    }
+
+    .demo-box {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 20px;
+      align-items: center;
+      padding: 28px;
+      background: linear-gradient(135deg, #fff 0%, #f7f1eb 100%);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .demo-box h2 {
+      margin: 0 0 8px;
+      font-size: clamp(1.5rem, 2.4vw, 2.2rem);
+      line-height: 1.12;
+    }
+
+    .demo-box p {
+      margin: 0;
+      color: #4b5563;
+      max-width: 720px;
+    }
+
+    .contact-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .contact-item {
+      padding: 20px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+    }
+
+    .contact-item .label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .contact-item strong {
+      font-size: 1.05rem;
+    }
+
+    footer {
+      padding: 30px 0 40px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 900px) {
+      .hero-grid,
+      .benefits,
+      .steps,
+      .contact-grid,
+      .demo-box {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar-inner {
+        align-items: flex-start;
+        padding: 12px 0;
+      }
+
+      .nav {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .hero {
+        padding-top: 36px;
+      }
+
+      .container {
+        width: min(var(--container), calc(100% - 20px));
+      }
+
+      .btn {
+        width: 100%;
+      }
+
+      .hero-actions {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="container topbar-inner">
+<a href="#" class="brand">
+  <img src="static/degus_logo.png" alt="Degus" class="logo">
+</a>
+      <nav class="nav">
+        <a href="#jak-to-funguje">Jak to funguje</a>
+        <a href="#demo">Demo</a>
+        <a href="#kontakt">Kontakt</a>
+        <a class="btn btn-primary" href="https://wine-app-yw5b.onrender.com">Přihlášení / demo</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <div class="eyebrow">Pro organizátory degustací vín</div>
+          <h1>Výsledky degustace za pár minut místo několika hodin</h1>
+          <p class="lead">
+            Nahrajete seznam vín, vytisknete bodovací tabulky a po zadání bodů máte
+            automaticky pořadí i výsledkovou listinu. Bez přepisování do Excelu.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://wine-app-yw5b.onrender.com">Vyzkoušet demo</a>
+            <a class="btn btn-secondary" href="#jak-to-funguje">Jak to funguje</a>
+          </div>
+
+          <div class="trust">
+            Bez registrace · 2 minuty · Pro 20–200 vzorků · Běží v prohlížeči
+          </div>
+        </div>
+
+        <aside class="hero-card">
+          <h3>Co dostanete v praxi</h3>
+          <ul class="hero-list">
+            <li>
+              <span>✓</span>
+              <div>
+                <strong>Import vzorků z Excelu nebo CSV</strong>
+                Žádné opisování seznamu vín.
+              </div>
+            </li>
+            <li>
+              <span>✓</span>
+              <div>
+                <strong>Tisk bodovacích tabulek pro komisi</strong>
+                Připravené během chvíle.
+              </div>
+            </li>
+            <li>
+              <span>✓</span>
+              <div>
+                <strong>Automatické pořadí a výsledky</strong>
+                Hned po zadání posledních bodů.
+              </div>
+            </li>
+          </ul>
+        </aside>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <div class="section-head">
+          <h2>Problém není degustace. Problém je to, co přijde po ní.</h2>
+          <p>
+            Ruční přepisování bodů, kontrola vzorců v Excelu a skládání pořadí berou hodiny.
+            Tohle zkracuje administrativu na minimum.
+          </p>
+        </div>
+
+        <div class="benefits">
+          <div class="card">
+            <h3>Ušetříš hodiny práce</h3>
+            <p>To, co se po degustaci řešilo půl dne, může být hotové během krátké chvíle.</p>
+          </div>
+          <div class="card">
+            <h3>Méně chyb</h3>
+            <p>Body počítá systém. Nepřepisuješ vzorce a nehledáš chyby až po zveřejnění.</p>
+          </div>
+          <div class="card">
+            <h3>Profesionální výstup</h3>
+            <p>Výsledková listina a pořadí jsou připravené hned a působí důvěryhodně.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="demo" class="demo">
+      <div class="container">
+        <div class="demo-box">
+          <div>
+            <h2>Vyzkoušej si demo na ukázkové degustaci</h2>
+            <p>
+              Demo obsahuje 30 vzorků a projdeš si celý proces od zadání vín až po výsledkovou listinu.
+              Ideální, pokud si chceš rychle ověřit, jestli ti to ušetří práci před další akcí.
+            </p>
+          </div>
+          <div>
+            <a class="btn btn-primary" href="https://wine-app-yw5b.onrender.com">Spustit demo degustaci</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="kontakt">
+      <div class="container">
+        <div class="section-head">
+          <h2>Chceš to ukázat na své degustaci?</h2>
+          <p>Ozvi se. Projdeme tvůj konkrétní případ a řekneme rovnou, jestli to pro tebe dává smysl.</p>
+        </div>
+
+        <div class="contact-grid">
+          <div class="contact-item">
+            <span class="label">E-mail</span>
+            <strong><a href="mailto:zurekm@gmail.com">zurekm@gmail.com</a></strong>
+          </div>
+          <div class="contact-item">
+            <span class="label">Telefon</span>
+            <strong><a href="tel:+420602430200">+420 602 430 200</a></strong>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      © 2026 Správa regionálních degustací vín. Všechna práva vyhrazena.
+    </div>
+  </footer>
+
+</body>
+</html>
