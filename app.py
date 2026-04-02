@@ -184,6 +184,9 @@ def init_db():
             UNIQUE (degustace_id, komise_cislo)
         )
     """)
+    kp_cols = {row[1] for row in conn.execute("PRAGMA table_info(komise_porotci)").fetchall()}
+    if "hlavni_komisar" not in kp_cols:
+        conn.execute("ALTER TABLE komise_porotci ADD COLUMN hlavni_komisar TEXT")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS vystavovatele (
@@ -414,6 +417,14 @@ def _nacti_porotce_map(conn, degustace_id):
         (degustace_id,),
     ).fetchall()
     return {int(r["komise_cislo"]): (r["jmena"] or "") for r in rows}
+
+
+def _nacti_hlavni_komisar_map(conn, degustace_id):
+    rows = conn.execute(
+        "SELECT komise_cislo, hlavni_komisar FROM komise_porotci WHERE degustace_id=?",
+        (degustace_id,),
+    ).fetchall()
+    return {int(r["komise_cislo"]): (r["hlavni_komisar"] or "").strip() for r in rows}
 
 
 def _vzorky_pro_komisi(vzorky_seznam, komise_1based):
@@ -1077,6 +1088,62 @@ def home():
                 box-sizing: border-box;
                 text-align: left;
             }}
+            /* Panel nápovědy (hlavní stránka a případně jinde): stejné okraje jako .box, lehce tmavší pozadí. */
+            .box-help {{
+                border: 1px solid #cdd2d8;
+                border-radius: 8px;
+                padding: 16px 18px;
+                margin-bottom: 20px;
+                background: #e8ebef;
+                color: #1f2933;
+            }}
+            .box-help h2 {{
+                margin: 0 0 10px 0;
+                font-size: 1.1rem;
+            }}
+            .box-help p {{
+                margin: 0 0 8px 0;
+                font-size: 14px;
+                line-height: 1.45;
+            }}
+            .box-help ul {{
+                margin: 6px 0 10px 1.1em;
+                padding: 0;
+                font-size: 14px;
+                line-height: 1.45;
+            }}
+            .box-help li {{
+                margin-bottom: 4px;
+            }}
+            /*
+            Konvence nápovědy u nadpisů v dalších sekcích:
+            - Tlačítko/odkaz .section-help-btn u <h2> (nebo vedle něj), aria-label="Nápověda k této sekci".
+            - Krátký text: atribut title=…, nebo <dialog> / popover s obsahem — doplní se v jednotlivých sekcích.
+            Příklad HTML (zatím nepoužito, jen jako šablona):
+            <span class="section-help-wrap"><h2>…</h2><button type="button" class="section-help-btn" title="TODO: text nápovědy">?</button></span>
+            */
+            .section-help-btn {{
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-width: 1.5rem;
+                height: 1.5rem;
+                padding: 0 0.35rem;
+                margin-left: 6px;
+                font-size: 13px;
+                font-weight: bold;
+                line-height: 1;
+                color: #374151;
+                background: #e5e7eb;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                cursor: help;
+                vertical-align: middle;
+            }}
+            .section-help-btn:hover {{
+                background: #dbeafe;
+                border-color: #93c5fd;
+            }}
         </style>
     </head>
     <body>
@@ -1105,6 +1172,24 @@ def home():
                 </div>
             </form>
         </div>
+
+        <div class="box-help" role="region" aria-label="Nápověda k hlavní stránce">
+            <h2>Rychlý průvodce</h2>
+            <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data.</p>
+            <p><strong>Seznam degustací</strong> — otevřete existující degustaci kliknutím na řádek a pokračujete ve správě vzorků a hodnocení.</p>
+            <p><strong>Doporučený postup:</strong></p>
+            <ul>
+                <li>Vytvořte degustaci (název a datum).</li>
+                <li>Otevřete ji ze seznamu a doplňte vzorky a nastavení.</li>
+                <li>Nechte zadat body komisím a zkontrolujte výsledky.</li>
+            </ul>
+            <p>V dalších částech aplikace bude u nadpisu k dispozici ikona <strong>?</strong> — zobrazí stručnou nápovědu k dané sekci.</p>
+        </div>
+        <!--
+        TODO nápověda u nadpisu v jiných route: vedle h2 přidat např.
+        <button type="button" class="section-help-btn" aria-label="Nápověda k této sekci" title="TODO: stručný popis sekce">?</button>
+        nebo <dialog> s popisem; styly .section-help-btn jsou výše v <style>.
+        -->
 
         <div class="box">
             <h2>Seznam degustací</h2>
@@ -1672,11 +1757,13 @@ def detail(id):
             if k < 1:
                 k = 1
             jmena = (request.form.get("jmena") or "").strip()
+            hlavni_k = (request.form.get("hlavni_komisar") or "").strip()
             conn.execute(
-                "INSERT INTO komise_porotci (degustace_id, komise_cislo, jmena) "
-                "VALUES (?, ?, ?) "
-                "ON CONFLICT(degustace_id, komise_cislo) DO UPDATE SET jmena=excluded.jmena",
-                (id, k, jmena or None),
+                "INSERT INTO komise_porotci (degustace_id, komise_cislo, jmena, hlavni_komisar) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(degustace_id, komise_cislo) DO UPDATE SET jmena=excluded.jmena, "
+                "hlavni_komisar=excluded.hlavni_komisar",
+                (id, k, jmena or None, hlavni_k or None),
             )
             conn.commit()
             flash("Porotci byli uloženi.", "success")
@@ -1917,6 +2004,7 @@ def detail(id):
         vzorky = conn.execute(VZORKY_SELECT_JOIN, (id,)).fetchall()
 
     porotci_map = _nacti_porotce_map(conn, id)
+    hlavni_komisar_map = _nacti_hlavni_komisar_map(conn, id)
 
     conn.close()
 
@@ -2033,14 +2121,6 @@ def detail(id):
         return f"<th>{escape(label)}</th>"
 
     datum_cz = format_datum_cz(degustace["datum"])
-    if rezim == "seznam":
-        title_rezim_suffix = "Seznam vzorků"
-    elif rezim == "katalog":
-        title_rezim_suffix = "Katalog"
-    elif rezim == "nastaveni":
-        title_rezim_suffix = "Nastavení"
-    else:
-        title_rezim_suffix = "Bodové hodnocení"
 
     katalog_top_x = degustace["katalog_top_x"]
     try:
@@ -2090,7 +2170,9 @@ def detail(id):
         opt_parts = []
         for i in range(1, n_kom + 1):
             sel_i = " selected" if k_for_select == i else ""
-            opt_parts.append(f'<option value="{i}"{sel_i}>Komise č.{i}</option>')
+            hk_i = (hlavni_komisar_map.get(i) or "").strip()
+            opt_lab = f"Komise č.{i}" + (f" — {hk_i}" if hk_i else "")
+            opt_parts.append(f'<option value="{i}"{sel_i}>{escape(opt_lab)}</option>')
         opts_joined = "".join(opt_parts)
         komise_select_html = f"""
             <form method="post" class="form-komise-inline form-komise-body">
@@ -2138,7 +2220,7 @@ def detail(id):
             """
         chrome_b_center_html = filter_row
         chrome_b_right_html = f"""
-                    <div class="import-help-row import-help-row-chrome">
+                    <div class="chrome-tools-row import-help-row-chrome">
                         <form id="form-import" method="post" enctype="multipart/form-data" class="import-row">
                             <input type="hidden" name="action" value="import">
                             {ph}
@@ -2148,14 +2230,6 @@ def detail(id):
                             <label for="input-import-file" class="btn">Import dat ze souboru</label>
                         </form>
                         <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
-                    </div>
-                    <div id="help-panel" class="help-panel">
-                        <p><strong>Filtrování</strong> (režim Zobrazení): slova oddělte mezerou. Řádek musí obsahovat
-                        <em>všechna</em> slova kdykoli v řádku (AND).</p>
-                        <p><strong>Import:</strong> tabulka z Excelu (tabulátory), CSV nebo středníky. <strong>Názvy hlaviček se ignorují</strong>,
-                        rozhoduje jen pořadí sloupců: 1) č.v. (ignoruje se), 2) Jméno, 3) Adresa, 4) Odrůda, 5) Přívlastek,
-                        6) Rok, 7) Body (volitelně). Číslo vzorku vždy přidělí aplikace. Stejná kombinace Jméno + Odrůda +
-                        Přívlastek + Rok jako u již uloženého vzorku nebo dvakrát v souboru → řádek se přeskočí.</p>
                     </div>
             """
     elif rezim == "katalog":
@@ -2177,16 +2251,66 @@ def detail(id):
                 </form>
             """
         chrome_b_center_html = filter_row_k
-        chrome_b_right_html = (
-            f'<div class="title-right-katalog-tools chrome-b-context">{katalog_tisk_html}{katalog_ekatalog_html}</div>'
-        )
+        chrome_b_right_html = f"""
+                    <div class="chrome-tools-row import-help-row-chrome">
+                        <div class="title-right-katalog-tools chrome-b-context">{katalog_tisk_html}{katalog_ekatalog_html}</div>
+                        <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
+                    </div>
+            """
     elif rezim == "komise":
-        chrome_b_right_html = f'<div class="komise-panel-inline chrome-b-context">{tisk_html}</div>'
+        chrome_b_right_html = f"""
+                    <div class="chrome-tools-row import-help-row-chrome">
+                        <div class="komise-panel-inline chrome-b-context">{tisk_html}</div>
+                        <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
+                    </div>
+            """
+    elif rezim == "nastaveni":
+        chrome_b_right_html = """
+                    <div class="chrome-tools-row import-help-row-chrome">
+                        <button type="button" class="btn-help" id="btn-help-toggle" title="Nápověda" aria-label="Nápověda">?</button>
+                    </div>
+            """
 
-    opt_seznam = " selected" if rezim == "seznam" else ""
-    opt_komise = " selected" if rezim == "komise" else ""
-    opt_katalog = " selected" if rezim == "katalog" else ""
-    opt_nastaveni = " selected" if rezim == "nastaveni" else ""
+    if rezim == "seznam":
+        help_panel_html = """
+                <div id="help-panel" class="help-panel help-panel-chrome" role="region" aria-label="Nápověda k sekci">
+                    <p><strong>Co je tahle stránka</strong> — jako jedna velká tabulka se všemi víny v degustaci. Řádky seřadíte kliknutím na název sloupce. Když přepnete na <strong>Úpravy</strong>, můžete řádky měnit nebo přidávat nové, podobně jako v Excelu.</p>
+                    <p><strong>Co kde najdete</strong> — uprostřed nahoře je <strong>hledání</strong> (jen když je zapnuté <strong>Prohlížení</strong>). Vpravo nahoře můžete <strong>nahrát soubor z Excelu</strong> a vedle toho je tlačítko <strong>?</strong>. Pod názvem degustace jsou <strong>záložky</strong> (kam v aplikaci jste) a přepínač <strong>Prohlížení / Úpravy</strong> (jen číst × můžu měnit).</p>
+                    <p><strong>Hledání</strong> — napište slova oddělená mezerou. Zobrazí se jen řádky, které obsahují <em>všechna</em> ta slova najednou (v celém řádku).</p>
+                    <p><strong>Nahrání z Excelu</strong> — připravte tabulku (můžete zkopírovat z Excelu a uložit jako CSV). <strong>První řádek s názvy sloupců aplikace nepoužívá</strong> — záleží jen na <strong>pořadí</strong> sloupců zleva: číslo vzorku (můžete vynechat, doplní se samo), název vína, adresa, odrůda, přívlastek, ročník, případně body. Stejný vzorek jako už v seznamu nebo stejný řádek dvakrát v souboru se <strong>nepřidá znovu</strong>.</p>
+                    <p><strong>Doporučení</strong> — nejdřív mít v tabulce všechny vzorky (nahrát soubor nebo doplnit ručně), zkontrolovat pořadí a hledání, pak přejít na zadávání bodů u komisí.</p>
+                </div>
+        """
+    elif rezim == "komise":
+        help_panel_html = """
+                <div id="help-panel" class="help-panel help-panel-chrome" role="region" aria-label="Nápověda k sekci">
+                    <p><strong>Co je tahle stránka</strong> — zde se zadávají <strong>body</strong> pro vzorky vybrané komise, podobně jako na papíře v tabulce, jen v počítači.</p>
+                    <p><strong>Výběr komise</strong> — v rozbalovacím seznamu je <strong>číslo komise</strong> a pokud to máte vyplněné v <strong>Nastavení → Komise</strong>, i <strong>jméno hlavního komisaře</strong>. Velký nadpis nad tabulkou ukazuje totéž (číslo a případně hlavního komisaře).</p>
+                    <p><strong>Členové komise</strong> — pod nadpisem je řádek se jmény všech členů (jak jste je zapsali v nastavení, oddělená čárkami).</p>
+                    <p><strong>QR kód pod nadpisem</strong> — když už má degustace v nastavení hodnocení vygenerovaný <strong>tajný odkaz</strong> (token), zobrazí se <strong>čtvercový QR</strong> pro <strong>mobilní zadávání bodů právě této komise</strong>. Komise ho naskenuje telefonem; je to stejná adresa jako u odkazů v nastavení, jen bez klikacího odkazu. Bez tokenu se QR neukáže.</p>
+                    <p><strong>Tisk</strong> — vpravo nahoře je tlačítko pro <strong>tisk podkladů</strong> pro komise (podle toho, jestli už máte vzorky rozdělené). Vedle je <strong>?</strong> — tato nápověda.</p>
+                    <p><strong>Na mobilu</strong> — po naskenování QR uvidí komise degustaci, číslo komise, jméno hlavního komisaře a tlačítkem <strong>Kontrola</strong> souhrn zadaných bodů.</p>
+                    <p><strong>Doporučení</strong> — ověřit rozdělení vzorků do komisí, případně vytisknout podklady, pak zadat body a případné poznámky u komise.</p>
+                </div>
+        """
+    elif rezim == "katalog":
+        help_panel_html = """
+                <div id="help-panel" class="help-panel help-panel-chrome" role="region" aria-label="Nápověda k sekci">
+                    <p><strong>Co je tahle stránka</strong> — náhled toho, jak může vypadat <strong>výpis pro návštěvníky</strong> (pořadí a údaje o víně). Hledání funguje stejně jako u seznamu vzorků, když máte zapnuté <strong>Prohlížení</strong>.</p>
+                    <p><strong>Co kde najdete</strong> — <strong>Tisk katalogu</strong> vytiskne dokument. <strong>E-katalog</strong> otevře verzi v prohlížeči (v telefonu nebo počítači; můžete použít QR kód na stránce, pokud ho vidíte). <strong>?</strong> je vpravo nahoře.</p>
+                    <p><strong>Doporučení</strong> — projděte pořadí a texty, pak buď vytiskněte, nebo pošlete odkaz na e-katalog.</p>
+                </div>
+        """
+    elif rezim == "nastaveni":
+        help_panel_html = """
+                <div id="help-panel" class="help-panel help-panel-chrome" role="region" aria-label="Nápověda k sekci">
+                    <p><strong>Co je tahle stránka</strong> — „kancelář“ degustace: kolik bude komisí, jak se hodnotí, údaje o vystavovatelích a odrůdách, nastavení katalogu. Citlivější věci (smazání vzorků, ukázkový import) jsou tady zvlášť.</p>
+                    <p><strong>Co kde najdete</strong> — vpravo nahoře jen <strong>?</strong>. Přepínač <strong>Prohlížení / Úpravy</strong> je u záložek pod názvem — <strong>měnit a ukládat</strong> můžete až když je <strong>Úpravy</strong>. Uvnitř stránky jsou další záložky (Degustace, Hodnocení, …).</p>
+                    <p><strong>Doporučení</strong> — nejdřív si projděte záložky v <strong>Prohlížení</strong>, pak přepněte na <strong>Úpravy</strong> a měňte, co potřebujete; u mazání a importu si vždy přečtěte potvrzovací hlášku.</p>
+                </div>
+        """
+    else:
+        help_panel_html = ""
 
     pk_edit = degustace["pocet_komisi"]
     if pk_edit is None:
@@ -2267,13 +2391,6 @@ def detail(id):
                 gap: 2px;
                 width: 100%;
             }}
-            .chrome-row-a {{
-                display: grid;
-                grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-                gap: 6px 10px;
-                align-items: center;
-            }}
-            .chrome-a-left {{ justify-self: start; min-width: 0; align-self: center; }}
             .chrome-row-b {{
                 display: grid;
                 grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -2350,39 +2467,51 @@ def detail(id):
                 justify-content: flex-end;
                 gap: 6px;
             }}
-            .chrome-a-center.title-center {{
-                justify-self: center;
-                align-self: center;
-                text-align: center;
-                font-size: 1.22rem;
-                font-weight: 700;
-                color: var(--accent);
-                letter-spacing: -0.02em;
-                padding: 0 8px;
-                line-height: 1.25;
-            }}
-            .chrome-a-right {{
-                justify-self: end;
+            .chrome-row-nav {{
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
-                justify-content: flex-end;
+                gap: 6px;
+                width: 100%;
+                box-sizing: border-box;
+                padding: 6px 0 8px;
+                margin: 2px 0 0;
+                border-top: 1px solid var(--border);
+            }}
+            .chrome-nav-primary {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: stretch;
                 gap: 6px;
                 min-width: 0;
             }}
-            .title-right-slot-edit {{
-                flex: 0 0 auto;
-                width: 11rem;
-                min-width: 11rem;
-                max-width: 11rem;
-                height: 1px;
-                margin: 0;
-                padding: 0;
-                overflow: hidden;
-                pointer-events: none;
+            .chrome-nav-admin {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 8px;
+                margin-left: auto;
+                padding-left: 12px;
+                border-left: 1px solid var(--border-strong);
+                min-width: 0;
             }}
-            .chrome-a-right .form-rezim-select {{
-                margin-left: 0;
+            .chrome-nav-admin .edit-switch-form {{
+                flex-shrink: 0;
+            }}
+            .form-rezim-tab {{
+                display: inline;
+                margin: 0;
+            }}
+            .chrome-nav-primary .form-rezim-tab .settings-tab {{
+                width: 100%;
+            }}
+            .chrome-nav-admin .form-rezim-tab .settings-tab {{
+                width: auto;
+            }}
+            @media (min-width: 420px) {{
+                .chrome-nav-primary .form-rezim-tab .settings-tab {{
+                    width: auto;
+                }}
             }}
             .komise-body-toolbar {{
                 display: flex;
@@ -2393,6 +2522,15 @@ def detail(id):
                 margin: 12px 8px 8px;
                 padding: 0 8px;
                 box-sizing: border-box;
+            }}
+            .komise-mobilni-qr {{
+                margin: 0 8px 10px;
+                padding: 0 8px;
+            }}
+            .komise-mobilni-qr img {{
+                display: block;
+                width: 120px;
+                height: 120px;
             }}
             .komise-body-title {{
                 margin: 0;
@@ -2529,13 +2667,6 @@ def detail(id):
             }}
             .import-help-row-chrome {{
                 justify-content: flex-end;
-            }}
-            .form-rezim-select {{
-                display: flex;
-                flex-wrap: wrap;
-                align-items: center;
-                gap: 8px;
-                margin: 0;
             }}
             .edit-switch-form {{
                 display: inline-flex;
@@ -2710,7 +2841,8 @@ def detail(id):
                 align-items: flex-end;
                 gap: 6px;
             }}
-            .import-help-row {{
+            .import-help-row,
+            .chrome-tools-row {{
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
@@ -2766,6 +2898,12 @@ def detail(id):
             .help-panel.is-open {{ display: block; }}
             .help-panel p {{ margin: 0 0 8px 0; }}
             .help-panel p:last-child {{ margin-bottom: 0; }}
+            .help-panel.help-panel-chrome {{
+                width: 100%;
+                max-width: none;
+                box-sizing: border-box;
+                margin-top: 6px;
+            }}
             .filter-row {{
                 display: flex;
                 flex-wrap: wrap;
@@ -3284,35 +3422,6 @@ def detail(id):
                 {flash_html}
                 {katalog_warning_html}
                 <div class="chrome-head">
-                <div class="chrome-row-a">
-                    <div class="chrome-a-left" aria-hidden="true"></div>
-                    <div class="chrome-a-center title-center">{escape(title_rezim_suffix)}</div>
-                    <div class="chrome-a-right">
-                            {('<span class="title-right-slot-edit" aria-hidden="true"></span>') if rezim == 'katalog' else ''}
-                            {'' if rezim == 'katalog' else f'''
-                            <form method="post" class="edit-switch-form">
-                                <input type="hidden" name="action" value="set_edit">
-                                <input type="hidden" name="edit" value="{'0' if edit_mode else '1'}">
-                                {ph}{st_hidden if rezim == 'nastaveni' else ''}
-                                <span class="switch-label">{'Úpravy' if edit_mode else 'Prohlížení'}</span>
-                                <button type="submit" class="switch-track{' is-on' if edit_mode else ''}" title="Přepnout režim úprav" aria-label="Přepnout režim úprav">
-                                    <span class="switch-knob"></span>
-                                </button>
-                            </form>
-                            '''}
-                            <form method="post" class="form-rezim-select">
-                                <input type="hidden" name="action" value="set_rezim">
-                                {ph}
-                                <label class="filter-label" for="sel-rezim">Sekce</label>
-                                <select name="rezim" id="sel-rezim" class="select-komise" onchange="this.form.submit()">
-                                    <option value="seznam"{opt_seznam}>Seznam vzorků</option>
-                                    <option value="komise"{opt_komise}>Bodové hodnocení</option>
-                                    <option value="katalog"{opt_katalog}>Katalog</option>
-                                    <option value="nastaveni"{opt_nastaveni}>Nastavení</option>
-                                </select>
-                            </form>
-                    </div>
-                </div>
                 <div class="chrome-row-b">
                     <div class="chrome-b-left title-block">
                         <a href="/" class="chrome-logo-link" title="Úvodní stránka"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="235" height="94" decoding="async"></a>
@@ -3324,6 +3433,49 @@ def detail(id):
                     <div class="chrome-b-center">{chrome_b_center_html}</div>
                     <div class="chrome-b-right">{chrome_b_right_html}</div>
                 </div>
+                <div class="chrome-row-nav" role="navigation" aria-label="Sekce degustace">
+                    <div class="chrome-nav-primary">
+                    <form method="post" class="form-rezim-tab">
+                        <input type="hidden" name="action" value="set_rezim">
+                        <input type="hidden" name="rezim" value="seznam">
+                        {ph}
+                        <button type="submit" class="settings-tab{(' is-active' if rezim == 'seznam' else '')}"{' aria-current="page"' if rezim == 'seznam' else ''}>Seznam vzorků</button>
+                    </form>
+                    <form method="post" class="form-rezim-tab">
+                        <input type="hidden" name="action" value="set_rezim">
+                        <input type="hidden" name="rezim" value="komise">
+                        {ph}
+                        <button type="submit" class="settings-tab{(' is-active' if rezim == 'komise' else '')}"{' aria-current="page"' if rezim == 'komise' else ''}>Bodové hodnocení</button>
+                    </form>
+                    <form method="post" class="form-rezim-tab">
+                        <input type="hidden" name="action" value="set_rezim">
+                        <input type="hidden" name="rezim" value="katalog">
+                        {ph}
+                        <button type="submit" class="settings-tab{(' is-active' if rezim == 'katalog' else '')}"{' aria-current="page"' if rezim == 'katalog' else ''}>Katalog</button>
+                    </form>
+                    </div>
+                    <div class="chrome-nav-admin" aria-label="Správa a nastavení">
+                            <!-- V katalogu není úprava řádků tabulkou: přepínač Úpravy skrytý, aby nevznikala falešná očekávání. -->
+                            {'' if rezim == 'katalog' else f'''
+                            <form method="post" class="edit-switch-form">
+                                <input type="hidden" name="action" value="set_edit">
+                                <input type="hidden" name="edit" value="{'0' if edit_mode else '1'}">
+                                {ph}{st_hidden if rezim == 'nastaveni' else ''}
+                                <span class="switch-label">{'Úpravy' if edit_mode else 'Prohlížení'}</span>
+                                <button type="submit" class="switch-track{' is-on' if edit_mode else ''}" title="Přepnout režim úprav" aria-label="Přepnout režim úprav">
+                                    <span class="switch-knob"></span>
+                                </button>
+                            </form>
+                            '''}
+                    <form method="post" class="form-rezim-tab">
+                        <input type="hidden" name="action" value="set_rezim">
+                        <input type="hidden" name="rezim" value="nastaveni">
+                        {ph}
+                        <button type="submit" class="settings-tab{(' is-active' if rezim == 'nastaveni' else '')}"{' aria-current="page"' if rezim == 'nastaveni' else ''}>Nastavení</button>
+                    </form>
+                    </div>
+                </div>
+                {help_panel_html}
                 </div>
             </div>
         </div>
@@ -3478,24 +3630,35 @@ def detail(id):
         html += "</div></div>"
         html += f'<div id="set-tab-kom" class="settings-panel-tab{" is-active" if settings_tab_cur == "kom" else ""}" role="tabpanel">'
         html += '<div class="settings-block"><h2>Porotci / komisaři</h2>'
-        html += '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">Jedno pole na komisi; jména oddělte čárkami.</p>'
+        html += (
+            '<p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">'
+            "U každé komise zadejte hlavního komisaře a případně ostatní členy (jména oddělte čárkami).</p>"
+        )
         for k in range(1, n_kom + 1):
             cur_jm = porotci_map.get(k) or ""
+            cur_hk = hlavni_komisar_map.get(k) or ""
             if edit_mode:
                 html += f"""
-                <form method="post" class="settings-row" style="align-items:flex-start;">
+                <form method="post" class="settings-row" style="align-items:flex-start;flex-wrap:wrap;">
                     <input type="hidden" name="action" value="porotci_uloz">
                     <input type="hidden" name="komise_cislo" value="{k}">
                     {ph_set}
-                    <label class="filter-label" for="inp-por-set-{k}" style="padding-top:8px;">Komise č.{k}</label>
-                    <input id="inp-por-set-{k}" type="text" name="jmena" value="{escape(cur_jm)}"
-                        placeholder="Např. Novák, Svobodová, …" autocomplete="off"
-                        style="flex:1;min-width:220px;max-width:100%;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
-                    <button class="btn btn-sm" type="submit">Uložit</button>
+                    <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:220px;max-width:100%;">
+                        <label class="filter-label" for="inp-hlavni-set-{k}">Komise č.{k} — hlavní komisař</label>
+                        <input id="inp-hlavni-set-{k}" type="text" name="hlavni_komisar" value="{escape(cur_hk)}"
+                            placeholder="Např. Ing. Novák" autocomplete="off"
+                            style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                        <label class="filter-label" for="inp-por-set-{k}">Členové komise</label>
+                        <input id="inp-por-set-{k}" type="text" name="jmena" value="{escape(cur_jm)}"
+                            placeholder="Např. Novák, Svobodová, …" autocomplete="off"
+                            style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border-strong);border-radius:6px;font:inherit;">
+                    </div>
+                    <button class="btn btn-sm" type="submit" style="align-self:flex-end;margin-top:22px;">Uložit</button>
                 </form>
                 """
             else:
-                html += f'<p style="margin:8px 0 12px;"><strong>Komise č.{k}:</strong> {escape(cur_jm) if cur_jm else "—"}</p>'
+                html += f'<p style="margin:8px 0 12px;"><strong>Komise č.{k}</strong> — hlavní komisař: {escape(cur_hk) if cur_hk else "—"}<br>'
+                html += f'<span style="font-size:13px;color:var(--text-muted);">Členové:</span> {escape(cur_jm) if cur_jm else "—"}</p>'
         html += "</div>"
         html += f"""<div class="settings-block"><h2>Rozdělení vzorků do komisí (tisk)</h2>
         <p style="margin:0 0 12px;font-size:13px;color:var(--text-muted);">
@@ -3931,11 +4094,26 @@ def detail(id):
         por_k = (porotci_map.get(komise_sel) or "").strip()
         por_line = escape(por_k) if por_k else "—"
 
+        hk_sel = (hlavni_komisar_map.get(komise_sel) or "").strip()
+        tit_kom = f"Bodové hodnocení — Komise č. {komise_sel}"
+        if hk_sel:
+            tit_kom += f" — {hk_sel}"
+
+        komise_qr_block = ""
+        h_tok_k = (degustace["hodnoceni_token"] or "").strip()
+        if h_tok_k:
+            base_h_q = request.url_root.rstrip("/")
+            k_eff_q = max(1, min(n_kom, komise_sel))
+            mob_u_q = f"{base_h_q}/hodnoceni/{id}/{k_eff_q}?t={quote(h_tok_k, safe='')}"
+            qr_u_q = f"https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={quote(mob_u_q, safe='')}"
+            komise_qr_block = f'<div class="komise-mobilni-qr"><img src="{escape(qr_u_q)}" width="120" height="120" alt=""></div>'
+
         html += f"""
             <div class="komise-body-toolbar">
-                <h2 class="komise-body-title">Bodové hodnocení Komise č. {komise_sel}</h2>
+                <h2 class="komise-body-title">{escape(tit_kom)}</h2>
                 {komise_select_html}
             </div>
+            {komise_qr_block}
             <p class="komise-porotci"><strong>Členové komise:</strong> {por_line}</p>
             <table class="data-grid table-komise">
                 <colgroup>
@@ -4342,7 +4520,7 @@ def detail(id):
     return html
 
 
-def _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id):
+def _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id, hlavni_komisar=""):
     if not vz_all:
         return f"""<!DOCTYPE html>
 <html lang="cs">
@@ -4366,6 +4544,7 @@ body{{font-family:Arial,sans-serif;background:#f2f4f6;margin:0;padding:20px 14px
         "degNazev": deg["nazev"] or "",
         "datumCz": format_datum_cz(deg["datum"]),
         "porotci": por_txt,
+        "hlavniKomisar": (hlavni_komisar or "").strip(),
         "labels": labels,
         "maxes": maxes,
         "vzorky": [_vzorek_hodnoceni_payload(v, deg) for v in vz_all],
@@ -4502,7 +4681,8 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
   </div>
 </div>
 <div class="modal-bg" id="hn-modal-bg"><div class="modal">
-  <h3>Kontrola — komise</h3>
+  <h3 id="hn-modal-title">Kontrola</h3>
+  <p id="hn-modal-kom" style="margin:0 0 10px;font-size:13px;color:#667084;line-height:1.35;"></p>
   <div id="hn-modal-body"></div>
   <p style="margin-top:12px;"><button type="button" class="btn btn-primary" id="hn-modal-close">Zavřít</button></p>
 </div></div>
@@ -4562,9 +4742,16 @@ body {{ margin:0; font-family: Arial, sans-serif; background: var(--bg); color: 
     editLocked = !overrideEdit && c.complete === true;
   }
 
+  function komiseSubline() {
+    var k = BOOT.komise;
+    var h = (BOOT.hlavniKomisar || "").trim();
+    return h ? ("Komise č. " + k + " — " + h) : ("Komise č. " + k);
+  }
   function renderTop() {
-    el("hn-row2-left").textContent = BOOT.datumCz + " · Komise č. " + BOOT.komise;
+    el("hn-row2-left").textContent = BOOT.datumCz + " · " + komiseSubline();
     el("hn-count").textContent = "Hodnoceno " + BOOT.x + " z " + BOOT.y;
+    var mk = el("hn-modal-kom");
+    if (mk) mk.textContent = komiseSubline();
   }
 
   function renderFooter() {
@@ -4962,14 +5149,15 @@ def hodnoceni_komise(degustace_id, komise_cislo):
     ).fetchall()
     pr = conn.execute(
         """
-        SELECT jmena FROM komise_porotci
+        SELECT jmena, hlavni_komisar FROM komise_porotci
         WHERE degustace_id = ? AND komise_cislo = ?
         """,
         (degustace_id, komise_cislo),
     ).fetchone()
     conn.close()
     por_txt = (pr["jmena"] or "").strip() if pr else ""
-    return _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id)
+    hlavni_txt = (pr["hlavni_komisar"] or "").strip() if pr else ""
+    return _html_hodnoceni_mobilni(deg, vz_all, komise_cislo, por_txt, degustace_id, hlavni_txt)
 
 
 @app.route("/mobile-katalog/<int:id>")
