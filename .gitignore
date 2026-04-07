@@ -5,5 +5,6 @@ log/
 tmp/
 input/
 data/
+help/
 *.db
 *.pyc

@@ -1,0 +1,2 @@
+If needed, read `docs/scoretaste-brief.md` and 'scoretaste-mvp-ux.md' first.
+

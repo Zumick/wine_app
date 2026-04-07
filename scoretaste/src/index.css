@@ -1,0 +1,294 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.45;
+  background: #f8f8f8;
+  color: #1a1a1a;
+}
+
+a {
+  color: #0b57d0;
+}
+
+ul {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+/* —— Visitor (mobile-first) —— */
+
+.visitor-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.visitor-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 0.5rem 0.65rem 0.6rem;
+}
+
+.visitor-header-row1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+}
+
+.visitor-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.visitor-logo {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  background: linear-gradient(145deg, #722f37, #4a1d24);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.visitor-event-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.visitor-info-btn {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  background: #fafafa;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.visitor-nav {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.visitor-nav-link {
+  flex: 1;
+  text-align: center;
+  padding: 0.45rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  background: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: #333;
+}
+
+.visitor-nav-link-active {
+  background: #eef2ff;
+  border-color: #a5b4fc;
+  color: #1e3a8a;
+}
+
+.visitor-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.visitor-filter-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+.visitor-filter-clear {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  color: #555;
+}
+
+.visitor-filter-clear:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.visitor-body {
+  flex: 1;
+}
+
+.visitor-page-main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 0.75rem 0.85rem 1.5rem;
+}
+
+.visitor-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 1rem;
+}
+
+@media (min-width: 480px) {
+  .visitor-modal-backdrop {
+    align-items: center;
+  }
+}
+
+.visitor-modal {
+  width: 100%;
+  max-width: 22rem;
+  background: #fff;
+  border-radius: 12px;
+  padding: 1rem 1rem 0.85rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.visitor-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.visitor-modal-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.visitor-modal-close {
+  border: none;
+  background: transparent;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  color: #666;
+  padding: 0 0.15rem;
+}
+
+.visitor-modal-body {
+  margin: 0.75rem 0 1rem;
+  font-size: 0.92rem;
+  color: #333;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.visitor-modal-ok {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: none;
+  border-radius: 8px;
+  background: #1e3a8a;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+/* Winery list cards */
+.visitor-winery-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.visitor-winery-card {
+  display: block;
+  padding: 0.85rem 0.9rem;
+  margin-bottom: 0.55rem;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #fff;
+  text-decoration: none;
+  color: inherit;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.visitor-winery-card-name {
+  font-weight: 700;
+  font-size: 1.02rem;
+  margin-bottom: 0.35rem;
+}
+
+.visitor-winery-card-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  color: #555;
+}
+
+.visitor-wine-card {
+  padding: 0.85rem 0;
+  border-bottom: 1px solid #eee;
+}
+
+.visitor-wine-card:last-child {
+  border-bottom: none;
+}
+
+.visitor-wine-label {
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+
+.visitor-wine-line2 {
+  margin-top: 0.2rem;
+  font-size: 0.92rem;
+  color: #444;
+}
+
+.visitor-wine-actions button {
+  min-height: 2.75rem;
+  padding: 0.4rem 0.75rem;
+}
+
+.visitor-page-heading {
+  margin: 0 0 0.75rem;
+  font-size: 1.2rem;
+}

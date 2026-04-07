@@ -47,6 +47,222 @@ SESSION_SETTINGS_TAB_PREFIX = "settings_tab_deg_"
 SETTINGS_TAB_IDS = ("deg", "hodn", "kom", "kat", "vys", "odr")
 _KOMISE_VELIKOST = 30
 
+TYP_AKCE_BODOVANA = "bodovana"
+TYP_AKCE_PRUVODCE = "pruvodce"
+
+URL_HOME = "/"
+URL_SCORE = "/score"
+URL_GUIDE = "/guide"
+URL_GUIDE_APP_PREFIX = "/guide"
+
+# Možné zápisy v DB pro stejný význam (canonical je TYP_AKCE_PRUVODCE)
+_TYP_AKCE_PRUVODCE_DB_VALUES = (TYP_AKCE_PRUVODCE, "průvodce")
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCORETASTE_DIST_DIR = os.path.join(_BASE_DIR, "scoretaste", "dist")
+SCORETASTE_ASSETS_DIR = os.path.join(SCORETASTE_DIST_DIR, "assets")
+SCORETASTE_EVENTS_DIR = os.path.join(
+    SCORETASTE_DIST_DIR, "guide", "data", "events"
+)
+SCORETASTE_PUBLIC_EVENTS_DIR = os.path.join(
+    _BASE_DIR, "scoretaste", "public", "guide", "data", "events"
+)
+
+
+def _scoretaste_deep_link(event_id):
+    return f"{URL_GUIDE_APP_PREFIX}/e/{event_id}"
+
+
+def _scoretaste_index():
+    index_path = os.path.join(SCORETASTE_DIST_DIR, "index.html")
+    if not os.path.isfile(index_path):
+        abort(404)
+    return send_from_directory(SCORETASTE_DIST_DIR, "index.html")
+
+
+def _write_scoretaste_event_skeleton_if_absent(new_id, nazev, datum):
+    """Debug: vytvoří `public/.../events/{id}.json`, pokud soubor ještě neexistuje."""
+    if os.path.isfile(_scoretaste_event_catalog_public_path(new_id)):
+        return
+    sid = str(int(new_id))
+    catalog = {
+        "event": {"id": sid, "name": nazev, "date": datum},
+        "wineries": [],
+        "wines": [],
+    }
+    _save_scoretaste_event_catalog_public(new_id, catalog)
+
+
+def _delete_scoretaste_event_json_files(deg_id):
+    """Smaže `{id}.json` ve `dist/.../events` i `public/.../events`, pokud existují."""
+    fn = f"{int(deg_id)}.json"
+    for base in (SCORETASTE_EVENTS_DIR, SCORETASTE_PUBLIC_EVENTS_DIR):
+        p = os.path.join(base, fn)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def _scoretaste_event_catalog_public_path(event_id):
+    return os.path.join(
+        SCORETASTE_PUBLIC_EVENTS_DIR, f"{int(event_id)}.json"
+    )
+
+
+def _scoretaste_event_catalog_dist_path(event_id):
+    return os.path.join(
+        SCORETASTE_EVENTS_DIR, f"{int(event_id)}.json"
+    )
+
+
+def _load_scoretaste_event_catalog_public(event_id):
+    """Načte katalog ze `public/.../events/{id}.json`; při chybě souboru vrátí None."""
+    path = _scoretaste_event_catalog_public_path(event_id)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _normalize_event_catalog(catalog, event_id_str):
+    """Zajistí `event`, `wineries`, `wines` a stringové `event.id`."""
+    if not isinstance(catalog, dict):
+        catalog = {}
+    ev = catalog.get("event")
+    if not isinstance(ev, dict):
+        ev = {}
+    ev["id"] = str(event_id_str)
+    ev.setdefault("name", "")
+    ev.setdefault("date", "")
+    catalog["event"] = ev
+    w = catalog.get("wineries")
+    catalog["wineries"] = w if isinstance(w, list) else []
+    w2 = catalog.get("wines")
+    catalog["wines"] = w2 if isinstance(w2, list) else []
+    return catalog
+
+
+def _save_scoretaste_event_catalog_public(event_id, catalog):
+    """Uloží katalog do `public` i `dist` (kvůli pořadí čtení v `guide_event_data`)."""
+    os.makedirs(SCORETASTE_PUBLIC_EVENTS_DIR, exist_ok=True)
+    os.makedirs(SCORETASTE_EVENTS_DIR, exist_ok=True)
+    path_public = _scoretaste_event_catalog_public_path(event_id)
+    path_dist = _scoretaste_event_catalog_dist_path(event_id)
+    for path in (path_public, path_dist):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(catalog, f, ensure_ascii=False, indent=2)
+
+
+def _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row):
+    """
+    Načte katalog z public JSON; pokud chybí, vytvoří skeleton z řádku degustace a uloží.
+    Vrací normalizovaný dict.
+    """
+    sid = str(int(event_id))
+    existing = _load_scoretaste_event_catalog_public(event_id)
+    if existing is None:
+        nazev = (deg_row["nazev"] or "").strip()
+        datum = (deg_row["datum"] or "").strip()
+        catalog = {
+            "event": {"id": sid, "name": nazev, "date": datum},
+            "wineries": [],
+            "wines": [],
+        }
+        _save_scoretaste_event_catalog_public(event_id, catalog)
+        return _normalize_event_catalog(catalog, sid)
+    normalized = _normalize_event_catalog(existing, sid)
+    if _ensure_winery_tokens(normalized):
+        _save_scoretaste_event_catalog_public(event_id, normalized)
+    return normalized
+
+
+def _next_free_numeric_id_str(existing_ids):
+    mx = 0
+    for x in existing_ids:
+        try:
+            mx = max(mx, int(str(x).strip()))
+        except (ValueError, TypeError):
+            continue
+    return str(mx + 1)
+
+
+def _winery_location_number_taken(catalog, location_number, exclude_winery_id=None):
+    """True, pokud jiné vinařství v katalogu už má stejné číslo sklepu (po strip)."""
+    loc = (location_number or "").strip()
+    if not loc:
+        return False
+    ex = None if exclude_winery_id is None else str(exclude_winery_id).strip()
+    for w in catalog.get("wineries") or []:
+        wid = str(w.get("id") or "").strip()
+        if ex is not None and wid == ex:
+            continue
+        if str(w.get("locationNumber") or "").strip() == loc:
+            return True
+    return False
+
+
+def _new_contributor_token():
+    return secrets.token_urlsafe(24)
+
+
+def _ensure_winery_tokens(catalog):
+    """
+    Zajistí, že každé vinařství má contributor token.
+    Vrací True, pokud se katalog změnil.
+    """
+    changed = False
+    for w in catalog.get("wineries") or []:
+        tok = str(w.get("token") or "").strip()
+        if not tok:
+            w["token"] = _new_contributor_token()
+            changed = True
+    return changed
+
+
+_LEN_MISTO = 200
+
+
+def _norm_typ_akce_uloz(raw):
+    """Povolené hodnoty typu akce při zápisu do DB."""
+    t = (raw or "").strip().lower()
+    if t == TYP_AKCE_PRUVODCE or t == "průvodce":
+        return TYP_AKCE_PRUVODCE
+    return TYP_AKCE_BODOVANA
+
+
+def _typ_akce_insert_from_request_path():
+    """POST z `/guide` resp. `/score` — typ podle URL (nezávislé na volané view funkci)."""
+    p = (request.path or "").rstrip("/") or "/"
+    if p == URL_GUIDE:
+        return TYP_AKCE_PRUVODCE
+    if p == URL_SCORE:
+        return TYP_AKCE_BODOVANA
+    return None
+
+
+def _deg_row_typ_akce(deg_row):
+    """Typ akce z řádku degustace (výchozí bodovaná)."""
+    if deg_row is None:
+        return TYP_AKCE_BODOVANA
+    try:
+        return _norm_typ_akce_uloz(deg_row["typ_akce"])
+    except (KeyError, TypeError):
+        return TYP_AKCE_BODOVANA
+
+
+def _deg_misto_text(deg_row):
+    try:
+        return (deg_row["misto"] or "").strip()
+    except (KeyError, TypeError, IndexError):
+        return ""
+
+
+def _misto_uloz(raw):
+    return _limit_str(raw, _LEN_MISTO)
+
+
 # Limity délky textů (aplikace/UI)
 _LEN_WEB = 500
 _LEN_POZN_VZOREK = 500
@@ -141,6 +357,13 @@ def init_db():
         conn.execute("ALTER TABLE degustace ADD COLUMN odruda_zob_tisk TEXT")
     if "odruda_zob_ekatalog" not in exist_deg:
         conn.execute("ALTER TABLE degustace ADD COLUMN odruda_zob_ekatalog TEXT")
+    if "typ_akce" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN typ_akce TEXT DEFAULT 'bodovana'")
+        conn.execute(
+            "UPDATE degustace SET typ_akce = 'bodovana' WHERE typ_akce IS NULL OR TRIM(COALESCE(typ_akce,'')) = ''"
+        )
+    if "misto" not in exist_deg:
+        conn.execute("ALTER TABLE degustace ADD COLUMN misto TEXT")
     conn.execute(
         """
         UPDATE degustace SET
@@ -936,193 +1159,229 @@ def _odruda_z_vzorek_formu(conn):
     return None, custom
 
 
-@app.route("/", methods=["GET", "POST"])
-def home():
-    conn = get_connection()
+_HOME_TYP_META = {
+    TYP_AKCE_BODOVANA: {
+        "page_title": "Správa a vyhodnocení bodovaných degustací",
+        "h1": "Správa a vyhodnocení bodovaných degustací",
+        "help_inner": """
+            <h2>Rychlý průvodce</h2>
+            <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data.</p>
+            <p><strong>Seznam degustací</strong> — otevřete existující degustaci kliknutím na řádek a pokračujete ve správě vzorků a hodnocení.</p>
+            <p><strong>Doporučený postup:</strong></p>
+            <ul>
+                <li>Vytvořte degustaci (název a datum).</li>
+                <li>Otevřete ji ze seznamu a doplňte vzorky a nastavení.</li>
+                <li>Nechte zadat body komisím a zkontrolujte výsledky.</li>
+            </ul>
+            <p>V dalších částech aplikace bude u nadpisu k dispozici ikona <strong>?</strong> — zobrazí stručnou nápovědu k dané sekci.</p>
+        """,
+        "empty_msg": "Zatím není založena žádná degustace tohoto typu.",
+        "nova_btn": "Nová bodovaná degustace",
+    },
+    TYP_AKCE_PRUVODCE: {
+        "page_title": "Průvodce degustací",
+        "h1": "Průvodce degustací",
+        "help_inner": """
+            <h2>Rychlý průvodce</h2>
+            <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data (otevřené sklepy, veřejná degustace).</p>
+            <p><strong>Seznam</strong> — otevřete akci kliknutím na řádek. Samostatná aplikace pro průvodce se postupně doplní.</p>
+            <p><strong>Doporučený postup:</strong> vytvořte akci, vyplňte údaje podle pokynů v jednotlivých částech aplikace.</p>
+        """,
+        "empty_msg": "Zatím není založena žádná akce tohoto typu.",
+        "nova_btn": "Nová degustace průvodce",
+    },
+}
 
-    if request.method == "POST":
-        action = request.form.get("action")
 
-        if action == "nova_degustace":
-            pocet_komisi = 3
-            conn.execute(
-                "INSERT INTO degustace (nazev, datum, pocet_komisi) VALUES (?, ?, ?)",
-                (request.form["nazev"], request.form["datum"], pocet_komisi)
+def _html_deg_list_button_inner(d):
+    nazev = (d["nazev"] or "").strip() or "Bez názvu"
+    misto_t = _deg_misto_text(d)
+    misto_disp = misto_t if misto_t else "—"
+    datum = (d["datum"] or "").strip()
+    return (
+        f'<span class="deg-btn-title">{escape(nazev)}</span>'
+        f'<span class="deg-btn-meta">{escape(misto_disp)} · {escape(datum)}</span>'
+    )
+
+
+def _html_deg_list_section(
+    degustace, post_url, empty_msg, include_pruvodce_delete=False
+):
+    if not degustace:
+        return f"<p>{escape(empty_msg)}</p>"
+    parts = ['<div class="degustace-grid">']
+    for d in degustace:
+        inner = _html_deg_list_button_inner(d)
+        vyber = f"""
+        <form method="post" action="{escape(post_url)}">
+            <input type="hidden" name="action" value="vyber">
+            <input type="hidden" name="degustace_id" value="{int(d['id'])}">
+            <button class="menu-button menu-button-deg" type="submit">{inner}</button>
+        </form>"""
+        if include_pruvodce_delete:
+            eid = int(d["id"])
+            admin_href = url_for("guide_admin_catalog", event_id=eid)
+            parts.append(
+                f"""
+        <div class="deg-row-guide">
+            {vyber}
+            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa katalogu</a>
+            <form method="post" action="{escape(post_url)}" class="deg-del-form">
+                <input type="hidden" name="action" value="smazat">
+                <input type="hidden" name="degustace_id" value="{eid}">
+                <button type="submit" class="btn-del-debug">Smazat</button>
+            </form>
+        </div>"""
             )
-            conn.commit()
-            conn.close()
-            return redirect("/")
+        else:
+            parts.append(vyber)
+    parts.append("</div>")
+    return "".join(parts)
 
-        elif action == "vyber":
-            conn.close()
-            deg_id = str(request.form["degustace_id"])
-            session[SESSION_REZIM_PREFIX + deg_id] = "seznam"
-            session[SESSION_EDIT_PREFIX + deg_id] = False
-            session[SESSION_KOMISE_PREFIX + deg_id] = 1
-            session.modified = True
-            return redirect(f"/degustace/{deg_id}")
 
-    degustace = conn.execute(
-        "SELECT * FROM degustace ORDER BY datum DESC, id DESC"
-    ).fetchall()
+def _html_nova_degustace_dialog(dialog_id, post_url, typ_akce_value, open_button_label, include_typ_hidden):
+    th = ""
+    if include_typ_hidden:
+        th = f'<input type="hidden" name="typ_akce" value="{escape(typ_akce_value)}">'
+    return f"""
+        <button type="button" class="btn-new-deg" onclick="document.getElementById('{dialog_id}').showModal()">{escape(open_button_label)}</button>
+        <dialog id="{dialog_id}" class="dlg-nova-deg">
+            <form method="post" action="{escape(post_url)}">
+                <input type="hidden" name="action" value="nova_degustace">
+                {th}
+                <h3 class="dlg-title">Nová degustace</h3>
+                <label class="dlg-field"><span>Název degustace</span><input name="nazev" required autocomplete="off"></label>
+                <label class="dlg-field"><span>Místo</span><input name="misto" autocomplete="off" placeholder="volitelně"></label>
+                <label class="dlg-field"><span>Datum</span><input type="date" name="datum" required></label>
+                <div class="dlg-actions">
+                    <button type="submit">Založit</button>
+                    <button type="button" class="dlg-cancel" onclick="document.getElementById('{dialog_id}').close()">Zrušit</button>
+                </div>
+            </form>
+        </dialog>
+        """
 
-    conn.close()
 
-    logo_url = url_for("degus_logo")
-    html = f"""
-    <html>
-    <head>
-        <title>Správa a vyhodnocení bodovaných degustací</title>
-        <style>
-            body {{
+def _html_shared_home_css():
+    return """
+            body {
                 font-family: Arial, sans-serif;
                 max-width: 1100px;
                 margin: 30px auto;
                 padding: 0 20px;
                 color: #222;
                 background: #f7f7f7;
-            }}
-            .box {{
+            }
+            .box {
                 border: 1px solid #d9d9d9;
                 border-radius: 8px;
                 padding: 18px;
                 margin-bottom: 20px;
                 background: white;
-            }}
-            h1, h2 {{
-                margin-bottom: 10px;
-            }}
-            .home-title-row {{
+            }
+            h1, h2 { margin-bottom: 10px; }
+            .home-title-row {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 flex-wrap: wrap;
-            }}
-            .home-title-row .app-logo {{
+            }
+            .home-title-row .app-logo {
                 height: 6.4453125rem;
                 width: auto;
                 max-height: 7.03125rem;
                 object-fit: contain;
                 flex-shrink: 0;
-            }}
-            .home-title-row span {{
-                font-size: 1.5rem;
-                font-weight: bold;
-            }}
-            input {{
+            }
+            .home-title-row span { font-size: 1.5rem; font-weight: bold; }
+            .score-sub { margin: 0 0 18px 0; font-size: 1.05rem; color: #444; }
+            .deg-block-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 14px;
+            }
+            .deg-block-head h2 { margin: 0; font-size: 1.2rem; }
+            .btn-new-deg {
+                padding: 10px 14px;
+                font-size: 14px;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            input {
                 padding: 8px 10px;
                 margin: 4px 0;
                 font-size: 14px;
-            }}
-            button {{
+            }
+            button:not(.btn-new-deg):not(.dlg-cancel) {
                 padding: 10px 10px;
                 margin: 4px 0;
                 font-size: 14px;
                 cursor: pointer;
-            }}
-            .form-nova-deg {{
-                display: grid;
-                grid-template-columns: minmax(160px, 360px) auto auto;
-                gap: 10px 14px;
-                align-items: end;
-                justify-content: start;
-                width: fit-content;
-                max-width: 100%;
-            }}
-            .form-nova-deg .fn-field {{
-                display: flex;
-                flex-direction: column;
-                gap: 4px;
-                min-width: 0;
-            }}
-            .form-nova-deg .fn-field > span:first-child {{
-                font-size: 13px;
-                color: #444;
-            }}
-            .form-nova-deg .fn-nazev {{
-                min-width: 160px;
-                width: 100%;
-                max-width: 360px;
-                box-sizing: border-box;
-            }}
-            .form-nova-deg .fn-datum {{
-                min-width: 140px;
-                width: auto;
-                box-sizing: border-box;
-            }}
-            .form-nova-deg .fn-actions-label {{
-                font-size: 13px;
-                line-height: 1.2;
-                min-height: 1.2em;
-                visibility: hidden;
-                user-select: none;
-            }}
-            .form-nova-deg .fn-actions button {{
-                margin: 0;
-                white-space: nowrap;
-            }}
-            @media (max-width: 640px) {{
-                .form-nova-deg {{
-                    grid-template-columns: 1fr;
-                    width: 100%;
-                }}
-            }}
-            .degustace-grid {{
+            }
+            .degustace-grid {
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
                 gap: 10px 12px;
-            }}
-            @media (max-width: 900px) {{
-                .degustace-grid {{ grid-template-columns: repeat(2, 1fr); }}
-            }}
-            @media (max-width: 520px) {{
-                .degustace-grid {{ grid-template-columns: 1fr; }}
-            }}
-            .degustace-grid form {{
-                margin: 0;
+            }
+            @media (max-width: 900px) {
+                .degustace-grid { grid-template-columns: repeat(2, 1fr); }
+            }
+            @media (max-width: 520px) {
+                .degustace-grid { grid-template-columns: 1fr; }
+            }
+            .degustace-grid form { margin: 0; min-width: 0; }
+            .deg-row-guide {
+                display: flex;
+                align-items: stretch;
+                gap: 8px;
                 min-width: 0;
-            }}
-            .menu-button {{
+            }
+            .deg-row-guide > form:first-child { flex: 1; min-width: 0; }
+            .guide-admin-cat-link {
+                align-self: center;
+                font-size: 13px;
+                white-space: nowrap;
+            }
+            .btn-del-debug {
+                padding: 10px 12px;
+                font-size: 13px;
+                cursor: pointer;
+                white-space: nowrap;
+                background: #fee2e2;
+                border: 1px solid #fca5a5;
+                color: #991b1b;
+            }
+            .menu-button {
                 width: 100%;
                 min-width: 0;
                 box-sizing: border-box;
                 text-align: left;
-            }}
-            /* Panel nápovědy (hlavní stránka a případně jinde): stejné okraje jako .box, lehce tmavší pozadí. */
-            .box-help {{
+            }
+            .menu-button-deg {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 4px;
+                line-height: 1.3;
+            }
+            .deg-btn-title { font-weight: 600; }
+            .deg-btn-meta { font-size: 13px; color: #555; }
+            .box-help {
                 border: 1px solid #cdd2d8;
                 border-radius: 8px;
                 padding: 16px 18px;
                 margin-bottom: 20px;
                 background: #e8ebef;
                 color: #1f2933;
-            }}
-            .box-help h2 {{
-                margin: 0 0 10px 0;
-                font-size: 1.1rem;
-            }}
-            .box-help p {{
-                margin: 0 0 8px 0;
-                font-size: 14px;
-                line-height: 1.45;
-            }}
-            .box-help ul {{
-                margin: 6px 0 10px 1.1em;
-                padding: 0;
-                font-size: 14px;
-                line-height: 1.45;
-            }}
-            .box-help li {{
-                margin-bottom: 4px;
-            }}
-            /*
-            Konvence nápovědy u nadpisů v dalších sekcích:
-            - Tlačítko/odkaz .section-help-btn u <h2> (nebo vedle něj), aria-label="Nápověda k této sekci".
-            - Krátký text: atribut title=…, nebo <dialog> / popover s obsahem — doplní se v jednotlivých sekcích.
-            Příklad HTML (zatím nepoužito, jen jako šablona):
-            <span class="section-help-wrap"><h2>…</h2><button type="button" class="section-help-btn" title="TODO: text nápovědy">?</button></span>
-            */
-            .section-help-btn {{
+            }
+            .box-help h2 { margin: 0 0 10px 0; font-size: 1.1rem; }
+            .box-help p { margin: 0 0 8px 0; font-size: 14px; line-height: 1.45; }
+            .box-help ul { margin: 6px 0 10px 1.1em; padding: 0; font-size: 14px; line-height: 1.45; }
+            .box-help li { margin-bottom: 4px; }
+            .section-help-btn {
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1139,83 +1398,883 @@ def home():
                 border-radius: 4px;
                 cursor: help;
                 vertical-align: middle;
-            }}
-            .section-help-btn:hover {{
+            }
+            .section-help-btn:hover {
                 background: #dbeafe;
                 border-color: #93c5fd;
-            }}
-        </style>
-    </head>
-    <body>
-        <h1 class="home-title-row">
-            <a href="https://degus.cz">
-            <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
-            </a>
-            <span>Správa a vyhodnocení bodovaných degustací</span>
-        </h1>
+            }
+            .dlg-nova-deg {
+                border: 1px solid #c5cad3;
+                border-radius: 8px;
+                padding: 0;
+                max-width: min(420px, 96vw);
+            }
+            .dlg-nova-deg::backdrop { background: rgba(0,0,0,0.35); }
+            .dlg-nova-deg .dlg-title { margin: 0 0 12px 0; font-size: 1.1rem; }
+            .dlg-nova-deg .dlg-field {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                margin-bottom: 10px;
+            }
+            .dlg-nova-deg .dlg-field > span:first-child { font-size: 13px; color: #444; }
+            .dlg-nova-deg form { padding: 16px 18px; }
+            .dlg-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+            .dlg-cancel { background: #f3f4f6; border: 1px solid #d1d5db; }
+    """
 
-        <div class="box">
-            <h2>Nová degustace</h2>
-            <form method="post" class="form-nova-deg">
-                <input type="hidden" name="action" value="nova_degustace">
-                <label class="fn-field">
-                    <span>Název degustace</span>
-                    <input name="nazev" required class="fn-nazev" autocomplete="off">
-                </label>
-                <label class="fn-field">
-                    <span>Datum</span>
-                    <input type="date" name="datum" required class="fn-datum">
-                </label>
-                <div class="fn-field fn-actions">
-                    <span class="fn-actions-label" aria-hidden="true">.</span>
-                    <button type="submit">Vytvořit degustaci</button>
-                </div>
-            </form>
+
+def _html_home_dashboard(deg_bod, deg_pruv, logo_url):
+    css = _html_shared_home_css()
+    dlg_b = _html_nova_degustace_dialog(
+        "dlg-home-bodo",
+        URL_HOME,
+        TYP_AKCE_BODOVANA,
+        "Nová bodovaná degustace",
+        True,
+    )
+    dlg_p = _html_nova_degustace_dialog(
+        "dlg-home-pruv",
+        URL_HOME,
+        TYP_AKCE_PRUVODCE,
+        "Nová degustace průvodce",
+        True,
+    )
+    list_b = _html_deg_list_section(
+        deg_bod,
+        URL_HOME,
+        "Zatím žádná bodovaná degustace.",
+    )
+    list_p = _html_deg_list_section(
+        deg_pruv,
+        URL_HOME,
+        "Zatím žádná akce průvodce.",
+    )
+    return f"""<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Score Taste</title>
+    <style>{css}</style>
+</head>
+<body>
+    <h1 class="home-title-row">
+        <a href="https://degus.cz">
+        <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
+        </a>
+        <span>Score Taste</span>
+    </h1>
+    <p class="score-sub">Kompletní správa degustací</p>
+
+    <div class="box deg-block">
+        <div class="deg-block-head">
+            <h2>Bodované degustace</h2>
+            {dlg_b}
         </div>
+        {list_b}
+    </div>
 
-        <div class="box-help" role="region" aria-label="Nápověda k hlavní stránce">
-            <h2>Rychlý průvodce</h2>
-            <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data.</p>
-            <p><strong>Seznam degustací</strong> — otevřete existující degustaci kliknutím na řádek a pokračujete ve správě vzorků a hodnocení.</p>
-            <p><strong>Doporučený postup:</strong></p>
-            <ul>
-                <li>Vytvořte degustaci (název a datum).</li>
-                <li>Otevřete ji ze seznamu a doplňte vzorky a nastavení.</li>
-                <li>Nechte zadat body komisím a zkontrolujte výsledky.</li>
-            </ul>
-            <p>V dalších částech aplikace bude u nadpisu k dispozici ikona <strong>?</strong> — zobrazí stručnou nápovědu k dané sekci.</p>
+    <div class="box deg-block">
+        <div class="deg-block-head">
+            <h2>Průvodce degustací</h2>
+            {dlg_p}
         </div>
-        <!--
-        TODO nápověda u nadpisu v jiných route: vedle h2 přidat např.
-        <button type="button" class="section-help-btn" aria-label="Nápověda k této sekci" title="TODO: stručný popis sekce">?</button>
-        nebo <dialog> s popisem; styly .section-help-btn jsou výše v <style>.
-        -->
+        {list_p}
+    </div>
+</body>
+</html>"""
 
-        <div class="box">
+
+def _html_home_typ_page(typ_akce, degustace, logo_url):
+    m = _HOME_TYP_META.get(typ_akce) or _HOME_TYP_META[TYP_AKCE_BODOVANA]
+    help_inner = m["help_inner"]
+    empty_msg = m["empty_msg"]
+    page_title = escape(m["page_title"])
+    h1 = escape(m["h1"])
+    post_url = URL_SCORE if typ_akce == TYP_AKCE_BODOVANA else URL_GUIDE
+    dlg_id = "dlg-score" if typ_akce == TYP_AKCE_BODOVANA else "dlg-guide"
+    css = _html_shared_home_css()
+    dlg = _html_nova_degustace_dialog(
+        dlg_id,
+        post_url,
+        typ_akce,
+        m["nova_btn"],
+        False,
+    )
+    list_html = _html_deg_list_section(
+        degustace,
+        post_url,
+        empty_msg,
+        include_pruvodce_delete=(typ_akce == TYP_AKCE_PRUVODCE),
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{page_title}</title>
+    <style>{css}</style>
+</head>
+<body>
+    <h1 class="home-title-row">
+        <a href="{URL_HOME}" title="Úvodní stránka — Score Taste">
+        <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
+        </a>
+        <span>{h1}</span>
+    </h1>
+
+    <div class="box deg-block">
+        <div class="deg-block-head">
             <h2>Seznam degustací</h2>
-    """
-
-    if degustace:
-        html += '<div class="degustace-grid">'
-        for d in degustace:
-            html += f"""
-            <form method="post">
-                <input type="hidden" name="action" value="vyber">
-                <input type="hidden" name="degustace_id" value="{d['id']}">
-                <button class="menu-button" type="submit">{d['nazev']} ({d['datum']})</button>
-            </form>
-            """
-        html += "</div>"
-    else:
-        html += "<p>Zatím není založena žádná degustace.</p>"
-
-    html += """
+            {dlg}
         </div>
-    </body>
-    </html>
-    """
+        {list_html}
+    </div>
 
-    return html
+    <div class="box-help" role="region" aria-label="Nápověda k hlavní stránce">
+        {help_inner}
+    </div>
+</body>
+</html>"""
+
+
+def _handle_home_typ(typ_akce_route):
+    tn = _norm_typ_akce_uloz(typ_akce_route)
+    conn = get_connection()
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "smazat":
+            if ((request.path or "").rstrip("/") or "/") != URL_GUIDE:
+                conn.close()
+                abort(400)
+            raw_id = request.form.get("degustace_id")
+            if not raw_id or not str(raw_id).isdigit():
+                conn.close()
+                abort(400)
+            deg_id = int(raw_id)
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            if not deg_row:
+                conn.close()
+                abort(404)
+            if _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+                conn.close()
+                return redirect(URL_GUIDE)
+            conn.execute("DELETE FROM degustace WHERE id = ?", (deg_id,))
+            conn.commit()
+            conn.close()
+            _delete_scoretaste_event_json_files(deg_id)
+            return redirect(URL_GUIDE)
+        if action == "nova_degustace":
+            pocet_komisi = 3
+            misto = _misto_uloz(request.form.get("misto"))
+            insert_typ = _typ_akce_insert_from_request_path() or tn
+            cur = conn.execute(
+                "INSERT INTO degustace (nazev, datum, pocet_komisi, typ_akce, misto) VALUES (?, ?, ?, ?, ?)",
+                (request.form["nazev"], request.form["datum"], pocet_komisi, insert_typ, misto),
+            )
+            conn.commit()
+            new_id = cur.lastrowid
+            conn.close()
+            if insert_typ == TYP_AKCE_PRUVODCE:
+                _write_scoretaste_event_skeleton_if_absent(
+                    new_id,
+                    (request.form.get("nazev") or "").strip(),
+                    (request.form.get("datum") or "").strip(),
+                )
+                return redirect(_scoretaste_deep_link(str(new_id)))
+            return redirect(request.path or URL_SCORE)
+        if action == "vyber":
+            deg_id = str(request.form["degustace_id"])
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            conn.close()
+            if not deg_row:
+                abort(404)
+            row_typ = _deg_row_typ_akce(deg_row)
+            on_guide = ((request.path or "").rstrip("/") or "/") == URL_GUIDE
+            if on_guide or tn == TYP_AKCE_PRUVODCE:
+                if row_typ != TYP_AKCE_PRUVODCE:
+                    return redirect(URL_GUIDE)
+                return redirect(_scoretaste_deep_link(deg_id))
+            if row_typ != TYP_AKCE_BODOVANA:
+                return redirect(URL_SCORE)
+            session[SESSION_REZIM_PREFIX + deg_id] = "seznam"
+            session[SESSION_EDIT_PREFIX + deg_id] = False
+            session[SESSION_KOMISE_PREFIX + deg_id] = 1
+            session.modified = True
+            return redirect(f"/degustace/{deg_id}")
+    if tn == TYP_AKCE_PRUVODCE:
+        degustace = conn.execute(
+            """
+            SELECT * FROM degustace
+            WHERE TRIM(COALESCE(typ_akce, '')) IN (?, ?)
+            ORDER BY datum DESC, id DESC
+            """,
+            _TYP_AKCE_PRUVODCE_DB_VALUES,
+        ).fetchall()
+    else:
+        degustace = conn.execute(
+            "SELECT * FROM degustace WHERE typ_akce = ? ORDER BY datum DESC, id DESC",
+            (tn,),
+        ).fetchall()
+    conn.close()
+    logo_url = url_for("degus_logo")
+    return _html_home_typ_page(tn, degustace, logo_url)
+
+
+def _handle_home_dashboard():
+    conn = get_connection()
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "nova_degustace":
+            tn = _norm_typ_akce_uloz(request.form.get("typ_akce"))
+            pocet_komisi = 3
+            misto = _misto_uloz(request.form.get("misto"))
+            cur = conn.execute(
+                "INSERT INTO degustace (nazev, datum, pocet_komisi, typ_akce, misto) VALUES (?, ?, ?, ?, ?)",
+                (request.form["nazev"], request.form["datum"], pocet_komisi, tn, misto),
+            )
+            conn.commit()
+            new_id = cur.lastrowid
+            conn.close()
+            if tn == TYP_AKCE_PRUVODCE:
+                return redirect(_scoretaste_deep_link(str(new_id)))
+            return redirect(URL_HOME)
+        if action == "vyber":
+            deg_id = str(request.form["degustace_id"])
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            conn.close()
+            if _deg_row_typ_akce(deg_row) == TYP_AKCE_PRUVODCE:
+                return redirect(_scoretaste_deep_link(deg_id))
+            session[SESSION_REZIM_PREFIX + deg_id] = "seznam"
+            session[SESSION_EDIT_PREFIX + deg_id] = False
+            session[SESSION_KOMISE_PREFIX + deg_id] = 1
+            session.modified = True
+            return redirect(f"/degustace/{deg_id}")
+    deg_bod = conn.execute(
+        "SELECT * FROM degustace WHERE typ_akce = ? ORDER BY datum DESC, id DESC",
+        (TYP_AKCE_BODOVANA,),
+    ).fetchall()
+    deg_pruv = conn.execute(
+        """
+        SELECT * FROM degustace
+        WHERE TRIM(COALESCE(typ_akce, '')) IN (?, ?)
+        ORDER BY datum DESC, id DESC
+        """,
+        _TYP_AKCE_PRUVODCE_DB_VALUES,
+    ).fetchall()
+    conn.close()
+    logo_url = url_for("degus_logo")
+    return _html_home_dashboard(deg_bod, deg_pruv, logo_url)
+
+
+@app.route("/", methods=["GET", "POST"])
+def home_dashboard():
+    return _handle_home_dashboard()
+
+
+@app.route("/score", methods=["GET", "POST"])
+def home_score():
+    return _handle_home_typ(TYP_AKCE_BODOVANA)
+
+
+@app.route("/guide", methods=["GET", "POST"])
+def home_guide():
+    return _handle_home_typ(TYP_AKCE_PRUVODCE)
+
+
+def _html_guide_admin_page(event_id, deg_row, catalog):
+    ev = catalog["event"]
+    title = escape((ev.get("name") or deg_row["nazev"] or "Akce").strip() or "Akce")
+    ev_json_id = escape(str(ev.get("id", "")))
+    ev_json_date = escape(str(ev.get("date", "")))
+    preview_href = f"{URL_GUIDE_APP_PREFIX}/e/{int(event_id)}/wineries"
+    guide_h = escape(URL_GUIDE)
+    prev_h = escape(preview_href)
+    flash_html = ""
+    for cat, msg in get_flashed_messages(with_categories=True):
+        flash_html += f'<p class="admin-flash admin-flash-{escape(cat)}">{escape(msg)}</p>\n'
+    head = f"""<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Katalog — {title}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; color: #222; }}
+        h1 {{ font-size: 1.25rem; }}
+        .nav {{ margin-bottom: 16px; font-size: 14px; }}
+        .box {{ border: 1px solid #ccc; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; background: #fafafa; }}
+        label {{ display: block; margin: 6px 0; font-size: 14px; }}
+        input[type=text], input[type=number] {{ width: 100%; max-width: 420px; padding: 6px 8px; }}
+        .winery-block {{ border-left: 3px solid #2563eb; padding-left: 10px; margin: 14px 0; }}
+        .wine-row {{ font-size: 13px; margin: 4px 0 4px 12px; color: #333; }}
+        .btn-copy-link {{ margin-left: 6px; }}
+        .copy-link-msg {{ display:none; color:#065f46; font-size:13px; margin:6px 0 0 0; }}
+        .fill-badge {{ display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; }}
+        .fill-badge-done {{ background:#dcfce7; color:#166534; border:1px solid #86efac; }}
+        .fill-badge-empty {{ background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; }}
+        button {{ padding: 6px 12px; cursor: pointer; margin-top: 6px; }}
+        .admin-flash {{ margin: 8px 0; }}
+        .admin-flash-error {{ color: #b91c1c; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <p class="nav"><a href="{guide_h}">← /guide</a> · <a href="{prev_h}">Otevřít ScoreTaste (seznam vinařství)</a></p>
+    <h1>Správa katalogu — {title}</h1>
+    {flash_html}
+    <div class="box">
+        <p><strong>DB:</strong> id={int(event_id)} · <strong>Událost (JSON):</strong> {ev_json_id} · <strong>Datum:</strong> {ev_json_date}</p>
+    </div>
+    <div class="box">
+        <h2 style="margin-top:0;font-size:1.05rem;">Přidat vinařství</h2>
+        <form method="post">
+            <input type="hidden" name="action" value="add_winery">
+            <label>Název vinařství *<input type="text" name="winery_name" required autocomplete="off"></label>
+            <label>Číslo sklepu *<input type="text" name="winery_location_number" required autocomplete="off" placeholder="unikátní v rámci akce"></label>
+            <button type="submit">Přidat vinařství</button>
+        </form>
+    </div>
+"""
+    parts = [head]
+    wines_by_wid = {}
+    for w in catalog["wines"]:
+        wid = str(w.get("wineryId") or "").strip()
+        wines_by_wid.setdefault(wid, []).append(w)
+    for wy in catalog["wineries"]:
+        wy_id = str(wy.get("id") or "").strip()
+        wname = escape(str(wy.get("name") or ""))
+        raw_wy_name = str(wy.get("name") or "")
+        loc_num = str(wy.get("locationNumber") or "").strip()
+        token = str(wy.get("token") or "").strip()
+        if not token:
+            token = _new_contributor_token()
+            wy["token"] = token
+        contrib_href = (
+            f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=wy_id, _external=True)}"
+            f"?{urlencode({'t': token})}"
+        )
+        wine_count = len(wines_by_wid.get(wy_id, []))
+        status_text = "Vyplněno" if wine_count > 0 else "Nevyplněno"
+        status_class = "fill-badge-done" if wine_count > 0 else "fill-badge-empty"
+        loc_disp = escape(loc_num) if loc_num else "—"
+        parts.append(
+            f'<div class="winery-block"><h3 style="margin:0 0 8px 0;font-size:1rem;">{wname} <small>(sklep {loc_disp}, id {escape(wy_id)})</small><span class="fill-badge {status_class}">{status_text}</span> <small>{wine_count} vín</small></h3>'
+        )
+        parts.append(
+            f"""
+        <form method="post" style="margin-bottom:8px;">
+            <input type="hidden" name="action" value="edit_winery">
+            <input type="hidden" name="edit_winery_id" value="{escape(wy_id)}">
+            <label>Název vinařství *<input type="text" name="edit_winery_name" value="{escape(raw_wy_name)}" required autocomplete="off"></label>
+            <label>Číslo sklepu *<input type="text" name="edit_winery_location_number" value="{escape(loc_num)}" required autocomplete="off"></label>
+            <button type="submit">Uložit vinařství</button>
+        </form>
+        <form method="post" style="margin-bottom:12px;">
+            <input type="hidden" name="action" value="delete_winery">
+            <input type="hidden" name="delete_winery_id" value="{escape(wy_id)}">
+            <button type="submit">Smazat vinařství</button>
+        </form>
+        <div style="margin-bottom:12px;">
+            <button
+              type="button"
+              class="btn-copy-link"
+              data-link="{escape(contrib_href)}"
+            >Kopírovat odkaz pro vinaře</button>
+            <p class="copy-link-msg">Odkaz zkopírován. Vložte ho do emailu nebo zprávy vinaři.</p>
+        </div>
+        """
+        )
+        for wine in wines_by_wid.get(wy_id, []):
+            wid_wine = str(wine.get("id") or "").strip()
+            wl = str(wine.get("label") or "").strip()
+            wv = str(wine.get("variety") or "").strip()
+            wp = str(wine.get("predicate") or "").strip()
+            wvin = str(wine.get("vintage") or "").strip()
+            wd = (wine.get("description") or "").strip()
+            sec_bits = [escape(wv)]
+            if wp:
+                sec_bits.append(escape(wp))
+            sec_bits.append(escape(wvin))
+            sec_line = " · ".join(sec_bits)
+            parts.append(
+                f"""
+<div class="wine-row" style="margin-bottom:12px;border-bottom:1px solid #eee;padding-bottom:8px;">
+    <div>· <strong>{escape(wl)}</strong> — {sec_line}{" — " + escape(wd) if wd else ""}</div>
+    <form method="post" style="margin-top:6px;">
+        <input type="hidden" name="action" value="edit_wine">
+        <input type="hidden" name="edit_wine_id" value="{escape(wid_wine)}">
+        <label>Název (label) *<input type="text" name="edit_wine_label" value="{escape(wl)}" required autocomplete="off"></label>
+        <label>Odrůda *<input type="text" name="edit_wine_variety" value="{escape(wv)}" required autocomplete="off"></label>
+        <label>Přívlastek<input type="text" name="edit_wine_predicate" value="{escape(wp)}" autocomplete="off"></label>
+        <label>Ročník *<input type="text" name="edit_wine_vintage" value="{escape(wvin)}" required autocomplete="off"></label>
+        <label>Popis<input type="text" name="edit_wine_description" value="{escape(wd)}" autocomplete="off"></label>
+        <button type="submit">Uložit víno</button>
+    </form>
+    <form method="post" style="display:inline;">
+        <input type="hidden" name="action" value="delete_wine">
+        <input type="hidden" name="delete_wine_id" value="{escape(wid_wine)}">
+        <button type="submit">Smazat víno</button>
+    </form>
+</div>
+"""
+            )
+        if not wines_by_wid.get(wy_id):
+            parts.append('<p class="wine-row" style="color:#666;">Zatím žádná vína.</p>')
+        form_add_wine = (
+            f"""
+        <form method="post" style="margin-top:10px;">
+            <input type="hidden" name="action" value="add_wine">
+            <input type="hidden" name="target_winery_id" value="{escape(wy_id)}">
+            <label>Název (label) *<input type="text" name="wine_label" required autocomplete="off"></label>
+            <label>Odrůda *<input type="text" name="wine_variety" required autocomplete="off"></label>
+            <label>Přívlastek<input type="text" name="wine_predicate" autocomplete="off"></label>
+            <label>Ročník *<input type="text" name="wine_vintage" required autocomplete="off"></label>
+            <label>Popis<input type="text" name="wine_description" autocomplete="off"></label>
+            <button type="submit">Přidat víno</button>
+        </form>
+        """
+        )
+        parts.append(form_add_wine)
+        parts.append("</div>")
+    if not catalog["wineries"]:
+        parts.append('<p style="color:#666;">Zatím žádná vinařství — přidejte první výše.</p>')
+    parts.append(
+        """
+<script>
+(() => {
+  const buttons = document.querySelectorAll(".btn-copy-link");
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const url = btn.getAttribute("data-link") || "";
+      const msg = btn.parentElement ? btn.parentElement.querySelector(".copy-link-msg") : null;
+      if (!url) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        if (msg) {
+          msg.style.display = "block";
+          setTimeout(() => { msg.style.display = "none"; }, 2200);
+        }
+      } catch (_) {
+        window.prompt("Zkopírujte odkaz ručně:", url);
+      }
+    });
+  });
+})();
+</script>
+"""
+    )
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+@app.route("/guide/admin/<int:event_id>", methods=["GET", "POST"])
+def guide_admin_catalog(event_id):
+    conn = get_connection()
+    deg_row = conn.execute(
+        "SELECT * FROM degustace WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    conn.close()
+    if not deg_row or _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+        abort(404)
+
+    if request.method == "POST":
+        catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
+        action = request.form.get("action")
+        if action == "add_winery":
+            name = (request.form.get("winery_name") or "").strip()
+            loc = (request.form.get("winery_location_number") or "").strip()
+            if not name or not loc:
+                flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            if _winery_location_number_taken(catalog, loc):
+                flash("Číslo sklepu už existuje.", "error")
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            new_wid = _next_free_numeric_id_str(
+                w.get("id") for w in catalog["wineries"]
+            )
+            entry = {
+                "id": new_wid,
+                "eventId": str(int(event_id)),
+                "name": name,
+                "locationNumber": loc,
+                "token": _new_contributor_token(),
+            }
+            catalog["wineries"].append(entry)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        if action == "add_wine":
+            winery_id = (request.form.get("target_winery_id") or "").strip()
+            if not winery_id or not any(
+                str(w.get("id")) == winery_id for w in catalog["wineries"]
+            ):
+                abort(400)
+            label = (request.form.get("wine_label") or "").strip()
+            variety = (request.form.get("wine_variety") or "").strip()
+            predicate = (request.form.get("wine_predicate") or "").strip()
+            vintage = (request.form.get("wine_vintage") or "").strip()
+            if not label or not variety or not vintage:
+                abort(400)
+            desc = (request.form.get("wine_description") or "").strip()
+            new_id = _next_free_numeric_id_str(
+                w.get("id") for w in catalog["wines"]
+            )
+            wine = {
+                "id": new_id,
+                "wineryId": winery_id,
+                "label": label,
+                "variety": variety,
+                "predicate": predicate,
+                "vintage": vintage,
+            }
+            if desc:
+                wine["description"] = desc
+            catalog["wines"].append(wine)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        if action == "edit_winery":
+            wid = (request.form.get("edit_winery_id") or "").strip()
+            if not wid or not any(
+                str(w.get("id")) == wid for w in catalog["wineries"]
+            ):
+                abort(400)
+            name = (request.form.get("edit_winery_name") or "").strip()
+            loc = (request.form.get("edit_winery_location_number") or "").strip()
+            if not name or not loc:
+                flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            if _winery_location_number_taken(catalog, loc, exclude_winery_id=wid):
+                flash("Číslo sklepu už existuje.", "error")
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            for w in catalog["wineries"]:
+                if str(w.get("id")) == wid:
+                    w["name"] = name
+                    w["locationNumber"] = loc
+                    w.pop("sortOrder", None)
+                    break
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        if action == "delete_winery":
+            wid = (request.form.get("delete_winery_id") or "").strip()
+            if not wid or not any(
+                str(w.get("id")) == wid for w in catalog["wineries"]
+            ):
+                abort(400)
+            catalog["wineries"] = [
+                x for x in catalog["wineries"] if str(x.get("id")) != wid
+            ]
+            catalog["wines"] = [
+                x for x in catalog["wines"] if str(x.get("wineryId")) != wid
+            ]
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        if action == "edit_wine":
+            wine_id = (request.form.get("edit_wine_id") or "").strip()
+            if not wine_id:
+                abort(400)
+            label = (request.form.get("edit_wine_label") or "").strip()
+            variety = (request.form.get("edit_wine_variety") or "").strip()
+            predicate = (request.form.get("edit_wine_predicate") or "").strip()
+            vintage = (request.form.get("edit_wine_vintage") or "").strip()
+            desc = (request.form.get("edit_wine_description") or "").strip()
+            if not label or not variety or not vintage:
+                abort(400)
+            found = False
+            for w in catalog["wines"]:
+                if str(w.get("id")) == wine_id:
+                    w["label"] = label
+                    w["variety"] = variety
+                    w["predicate"] = predicate
+                    w["vintage"] = vintage
+                    w.pop("name", None)
+                    if desc:
+                        w["description"] = desc
+                    else:
+                        w.pop("description", None)
+                    found = True
+                    break
+            if not found:
+                abort(400)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        if action == "delete_wine":
+            wine_id = (request.form.get("delete_wine_id") or "").strip()
+            if not wine_id:
+                abort(400)
+            n_before = len(catalog["wines"])
+            catalog["wines"] = [
+                x for x in catalog["wines"] if str(x.get("id")) != wine_id
+            ]
+            if len(catalog["wines"]) == n_before:
+                abort(400)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            return redirect(url_for("guide_admin_catalog", event_id=event_id))
+        abort(400)
+
+    catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
+    return _html_guide_admin_page(event_id, deg_row, catalog)
+
+
+@app.route("/guide/assets/<path:filename>")
+def guide_assets(filename):
+    if not os.path.isdir(SCORETASTE_ASSETS_DIR):
+        abort(404)
+    return send_from_directory(SCORETASTE_ASSETS_DIR, filename)
+
+
+@app.route("/guide/data/events/<event_id>.json")
+def guide_event_data(event_id):
+    filename = f"{event_id}.json"
+    print("BASE_DIR:", _BASE_DIR)
+    print("DIST_EVENTS:", SCORETASTE_EVENTS_DIR)
+    print("PUBLIC_EVENTS:", SCORETASTE_PUBLIC_EVENTS_DIR)
+    print("REQUESTED_FILE:", filename)
+    print("DIST_EXISTS:", os.path.isdir(SCORETASTE_EVENTS_DIR), os.path.isfile(os.path.join(SCORETASTE_EVENTS_DIR, filename)))
+    print("PUBLIC_EXISTS:", os.path.isdir(SCORETASTE_PUBLIC_EVENTS_DIR), os.path.isfile(os.path.join(SCORETASTE_PUBLIC_EVENTS_DIR, filename)))        
+    for base_dir in (SCORETASTE_EVENTS_DIR, SCORETASTE_PUBLIC_EVENTS_DIR):
+        if not os.path.isdir(base_dir):
+            continue
+        file_path = os.path.join(base_dir, filename)
+        if os.path.isfile(file_path):
+            return send_from_directory(
+                base_dir, filename, mimetype="application/json"
+            )
+    print("EVENT_JSON_NOT_FOUND", flush=True)        
+    abort(404)
+
+
+def _html_guide_contributor_page(event_id, winery, catalog):
+    ev = catalog["event"]
+    event_name = escape((ev.get("name") or "").strip() or f"Akce {event_id}")
+    winery_name = escape(str(winery.get("name") or "").strip() or "Vinařství")
+    winery_id = str(winery.get("id") or "").strip()
+    token = str(winery.get("token") or "").strip()
+    back_to_self = (
+        f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id)}"
+        f"?{urlencode({'t': token})}"
+    )
+    flash_html = ""
+    for cat, msg in get_flashed_messages(with_categories=True):
+        flash_html += f'<p class="c-flash c-flash-{escape(cat)}">{escape(msg)}</p>\n'
+    wines = [
+        w for w in catalog["wines"]
+        if str(w.get("wineryId") or "").strip() == winery_id
+    ]
+    wines = sorted(wines, key=lambda x: str(x.get("label") or "").lower())
+    out = [f"""<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vinař — {event_name} / {winery_name}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; max-width: 860px; margin: 22px auto; padding: 0 14px; color:#222; }}
+    h1 {{ font-size: 1.2rem; margin-bottom: 4px; }}
+    .meta {{ color:#555; margin: 0 0 16px 0; }}
+    .box {{ border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:12px; background:#fafafa; }}
+    label {{ display:block; margin:6px 0; font-size:14px; }}
+    input[type=text], textarea {{ width:100%; max-width:580px; padding:6px 8px; }}
+    textarea {{ min-height:70px; resize:vertical; }}
+    button {{ padding:6px 12px; cursor:pointer; margin-top:6px; }}
+    .c-flash {{ margin: 8px 0; font-weight:600; }}
+    .c-flash-error {{ color:#b91c1c; }}
+    .c-flash-success {{ color:#065f46; }}
+  </style>
+</head>
+<body>
+  <h1>Doplňte vína</h1>
+  <p class="meta"><strong>Akce:</strong> {event_name}<br><strong>Vinařství:</strong> {winery_name}</p>
+  {flash_html}
+"""]
+    if not wines:
+        out.append('<p class="meta">Zatím nejsou evidována žádná vína.</p>')
+    for wine in wines:
+        wine_id = str(wine.get("id") or "").strip()
+        label = str(wine.get("label") or "").strip()
+        variety = str(wine.get("variety") or "").strip()
+        predicate = str(wine.get("predicate") or "").strip()
+        vintage = str(wine.get("vintage") or "").strip()
+        description = str(wine.get("description") or "").strip()
+        out.append(
+            f"""
+  <div class="box">
+    <form method="post" action="{escape(back_to_self)}">
+      <input type="hidden" name="action" value="edit_wine">
+      <input type="hidden" name="wine_id" value="{escape(wine_id)}">
+      <label>Název (label) *<input type="text" name="label" value="{escape(label)}" required autocomplete="off"></label>
+      <label>Odrůda (variety) *<input type="text" name="variety" value="{escape(variety)}" required autocomplete="off"></label>
+      <label>Přívlastek (predicate)<input type="text" name="predicate" value="{escape(predicate)}" autocomplete="off"></label>
+      <label>Ročník (vintage) *<input type="text" name="vintage" value="{escape(vintage)}" required autocomplete="off"></label>
+      <label>Popis (description)<textarea name="description">{escape(description)}</textarea></label>
+      <button type="submit">Uložit</button>
+    </form>
+    <form method="post" action="{escape(back_to_self)}">
+      <input type="hidden" name="action" value="delete_wine">
+      <input type="hidden" name="wine_id" value="{escape(wine_id)}">
+      <button type="submit">Smazat víno</button>
+    </form>
+  </div>
+"""
+        )
+    out.append(
+        f"""
+  <div class="box">
+    <h2 style="margin:0 0 8px 0; font-size:1rem;">Přidat víno</h2>
+    <form method="post" action="{escape(back_to_self)}">
+      <input type="hidden" name="action" value="add_wine">
+      <label>Název (label) *<input type="text" name="label" required autocomplete="off"></label>
+      <label>Odrůda (variety) *<input type="text" name="variety" required autocomplete="off"></label>
+      <label>Přívlastek (predicate)<input type="text" name="predicate" autocomplete="off"></label>
+      <label>Ročník (vintage) *<input type="text" name="vintage" required autocomplete="off"></label>
+      <label>Popis (description)<textarea name="description"></textarea></label>
+      <button type="submit">Uložit</button>
+    </form>
+  </div>
+</body>
+</html>"""
+    )
+    return "".join(out)
+
+
+@app.route("/guide/contribute/<event_id>/<winery_id>", methods=["GET", "POST"])
+def guide_contributor_catalog(event_id, winery_id):
+    try:
+        eid = int(event_id)
+    except (TypeError, ValueError):
+        abort(404)
+    conn = get_connection()
+    deg_row = conn.execute(
+        "SELECT * FROM degustace WHERE id = ?",
+        (eid,),
+    ).fetchone()
+    conn.close()
+    if not deg_row or _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+        abort(404)
+
+    catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
+    winery_id_s = str(winery_id).strip()
+    winery = next(
+        (w for w in catalog["wineries"] if str(w.get("id") or "").strip() == winery_id_s),
+        None,
+    )
+    if not winery:
+        abort(404)
+
+    tok_qs = (request.args.get("t") or "").strip()
+    tok_expected = str(winery.get("token") or "").strip()
+    if not tok_qs or not tok_expected or not hmac.compare_digest(tok_expected, tok_qs):
+        abort(403)
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+        label = (request.form.get("label") or "").strip()
+        variety = (request.form.get("variety") or "").strip()
+        predicate = (request.form.get("predicate") or "").strip()
+        vintage = (request.form.get("vintage") or "").strip()
+        desc = (request.form.get("description") or "").strip()
+        if action == "add_wine":
+            if not label or not variety or not vintage:
+                flash("Label, variety a vintage jsou povinné.", "error")
+                return redirect(
+                    f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                )
+            new_id = _next_free_numeric_id_str(w.get("id") for w in catalog["wines"])
+            wine = {
+                "id": new_id,
+                "wineryId": winery_id_s,
+                "label": label,
+                "variety": variety,
+                "predicate": predicate,
+                "vintage": vintage,
+            }
+            if desc:
+                wine["description"] = desc
+            catalog["wines"].append(wine)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            flash("Uloženo.", "success")
+            return redirect(
+                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+            )
+        if action == "edit_wine":
+            wine_id = (request.form.get("wine_id") or "").strip()
+            if not wine_id or not label or not variety or not vintage:
+                flash("Label, variety a vintage jsou povinné.", "error")
+                return redirect(
+                    f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                )
+            found = False
+            for w in catalog["wines"]:
+                if (
+                    str(w.get("id") or "").strip() == wine_id
+                    and str(w.get("wineryId") or "").strip() == winery_id_s
+                ):
+                    w["label"] = label
+                    w["variety"] = variety
+                    w["predicate"] = predicate
+                    w["vintage"] = vintage
+                    if desc:
+                        w["description"] = desc
+                    else:
+                        w.pop("description", None)
+                    found = True
+                    break
+            if not found:
+                abort(400)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            flash("Uloženo.", "success")
+            return redirect(
+                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+            )
+        if action == "delete_wine":
+            wine_id = (request.form.get("wine_id") or "").strip()
+            n_before = len(catalog["wines"])
+            catalog["wines"] = [
+                x
+                for x in catalog["wines"]
+                if not (
+                    str(x.get("id") or "").strip() == wine_id
+                    and str(x.get("wineryId") or "").strip() == winery_id_s
+                )
+            ]
+            if len(catalog["wines"]) == n_before:
+                abort(400)
+            _save_scoretaste_event_catalog_public(event_id, catalog)
+            flash("Smazáno.", "success")
+            return redirect(
+                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+            )
+        abort(400)
+
+    return _html_guide_contributor_page(event_id, winery, catalog)
+
+
+@app.route("/guide/e/<event_id>")
+@app.route("/guide/e/<event_id>/wineries")
+@app.route("/guide/e/<event_id>/wineries/<winery_id>")
+@app.route("/guide/e/<event_id>/my")
+def guide_scoretaste_app(event_id, winery_id=None):
+    return _scoretaste_index()
+
+
+@app.route("/bodovana", methods=["GET", "POST"])
+def legacy_bodovana():
+    return redirect(URL_SCORE, code=302)
+
+
+@app.route("/pruvodce", methods=["GET", "POST"])
+def legacy_pruvodce():
+    return redirect(URL_GUIDE, code=302)
 
 
 @app.route("/degustace/<int:id>", methods=["GET", "POST"])
@@ -1395,8 +2454,8 @@ def detail(id):
                 demo_id = int(row_d[0])
             else:
                 conn.execute(
-                    "INSERT INTO degustace (nazev, datum, pocet_komisi) VALUES (?, ?, ?)",
-                    ("DEMO", "2027-07-02", 3),
+                    "INSERT INTO degustace (nazev, datum, pocet_komisi, typ_akce, misto) VALUES (?, ?, ?, ?, ?)",
+                    ("DEMO", "2027-07-02", 3, TYP_AKCE_BODOVANA, None),
                 )
                 conn.commit()
                 demo_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -1994,6 +3053,9 @@ def detail(id):
         "SELECT * FROM degustace WHERE id = ?",
         (id,)
     ).fetchone()
+    if not degustace:
+        conn.close()
+        abort(404)
 
     vzorky = conn.execute(VZORKY_SELECT_JOIN, (id,)).fetchall()
 
@@ -2322,6 +3384,15 @@ def detail(id):
             pk_edit = n_kom
     pk_edit = max(1, min(10, pk_edit))
 
+    typ_deg = _deg_row_typ_akce(degustace)
+    typ_akce_banner_html = ""
+    if typ_deg == TYP_AKCE_PRUVODCE:
+        typ_akce_banner_html = """
+                <div class="typ-akce-banner" role="status">
+                    <strong>Průvodce degustací</strong> — samostatné obrazovky pro průvodce se postupně doplní; prozatím používáte stejné rozhraní jako u bodované degustace.
+                </div>
+        """
+
     logo_url = url_for("degus_logo")
     html = f"""<!DOCTYPE html>
     <html lang="cs">
@@ -2355,6 +3426,16 @@ def detail(id):
                 font-size: 15px;
                 line-height: 1.45;
                 -webkit-font-smoothing: antialiased;
+            }}
+            .typ-akce-banner {{
+                margin: 0 0 12px 0;
+                padding: 10px 14px;
+                border: 1px solid var(--border-strong);
+                border-radius: var(--radius-sm);
+                background: #f0f4f8;
+                color: var(--text);
+                font-size: 14px;
+                line-height: 1.45;
             }}
             html {{
                 scroll-padding-top: var(--chrome-h, 160px);
@@ -3420,11 +4501,12 @@ def detail(id):
         <div class="fixed-chrome" id="fixed-chrome">
             <div class="fixed-chrome-inner">
                 {flash_html}
+                {typ_akce_banner_html}
                 {katalog_warning_html}
                 <div class="chrome-head">
                 <div class="chrome-row-b">
                     <div class="chrome-b-left title-block">
-                        <a href="/" class="chrome-logo-link" title="Úvodní stránka"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="235" height="94" decoding="async"></a>
+                        <a href="/" class="chrome-logo-link" title="Úvodní stránka — Score Taste"><img src="{escape(logo_url)}" class="app-logo app-logo-chrome" alt="Logo" width="235" height="94" decoding="async"></a>
                         <div class="chrome-title-stack">
                             <h1 class="deg-nazev"><span class="deg-title-name">{escape(degustace['nazev'])}</span></h1>
                             <span class="datum">{escape(datum_cz)}</span>
@@ -5389,7 +6471,7 @@ def mobile_katalog(id):
         <div class="top">
             <div class="top-head">
                 <div class="top-head-main">
-                    <a href="/" class="ek-logo-link" title="Úvodní stránka"><img src="{escape(ek_logo_url)}" class="ek-logo" alt="" width="120" height="48" decoding="async"></a>
+                    <a href="/" class="ek-logo-link" title="Úvodní stránka — Score Taste"><img src="{escape(ek_logo_url)}" class="ek-logo" alt="" width="120" height="48" decoding="async"></a>
                     <h1 class="title">{title}</h1>
                 </div>
                 <button id="btn-info" class="btn-info" type="button" title="Info o degustaci">Info</button>
