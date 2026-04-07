@@ -9,6 +9,7 @@ from flask import (
     url_for,
     send_from_directory,
     abort,
+    Response,
 )
 from markupsafe import escape
 from urllib.parse import urlencode, quote
@@ -81,21 +82,20 @@ def _scoretaste_index():
 
 
 def _write_scoretaste_event_skeleton_if_absent(new_id, nazev, datum):
-    """Debug: vytvoří `public/.../events/{id}.json`, pokud soubor ještě neexistuje."""
-    if os.path.isfile(_scoretaste_event_catalog_public_path(new_id)):
-        return
-    sid = str(int(new_id))
-    catalog = {
-        "event": {"id": sid, "name": nazev, "date": datum},
-        "wineries": [],
-        "wines": [],
-    }
-    _save_scoretaste_event_catalog_public(new_id, catalog)
+    """Katalog je v DB; žádný zápis JSON při založení akce."""
+    return
 
 
 def _delete_scoretaste_event_json_files(deg_id):
-    """Smaže `{id}.json` ve `dist/.../events` i `public/.../events`, pokud existují."""
-    fn = f"{int(deg_id)}.json"
+    """Smaže řádky ScoreTaste katalogu v DB a volitelně staré JSON soubory."""
+    eid = int(deg_id)
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM scoretaste_wineries WHERE event_id = ?", (eid,))
+        conn.commit()
+    finally:
+        conn.close()
+    fn = f"{eid}.json"
     for base in (SCORETASTE_EVENTS_DIR, SCORETASTE_PUBLIC_EVENTS_DIR):
         p = os.path.join(base, fn)
         try:
@@ -117,13 +117,17 @@ def _scoretaste_event_catalog_dist_path(event_id):
     )
 
 
-def _load_scoretaste_event_catalog_public(event_id):
-    """Načte katalog ze `public/.../events/{id}.json`; při chybě souboru vrátí None."""
+def _load_scoretaste_event_catalog_json_file(event_id):
+    """Best-effort načtení starého JSON (migrace); při chybě souboru vrátí None."""
     path = _scoretaste_event_catalog_public_path(event_id)
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    path2 = _scoretaste_event_catalog_dist_path(event_id)
+    if os.path.isfile(path2):
+        with open(path2, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
 
 def _normalize_event_catalog(catalog, event_id_str):
@@ -144,25 +148,164 @@ def _normalize_event_catalog(catalog, event_id_str):
     return catalog
 
 
-def _save_scoretaste_event_catalog_public(event_id, catalog):
-    """Uloží katalog do `public` i `dist` (kvůli pořadí čtení v `guide_event_data`)."""
-    os.makedirs(SCORETASTE_PUBLIC_EVENTS_DIR, exist_ok=True)
-    os.makedirs(SCORETASTE_EVENTS_DIR, exist_ok=True)
-    path_public = _scoretaste_event_catalog_public_path(event_id)
-    path_dist = _scoretaste_event_catalog_dist_path(event_id)
-    for path in (path_public, path_dist):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(catalog, f, ensure_ascii=False, indent=2)
+def _scoretaste_catalog_from_db(conn, event_id):
+    """Sestaví katalog ve tvaru JSON pro frontend; None pokud akce neexistuje nebo není průvodce."""
+    eid = int(event_id)
+    deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+    if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+        return None
+    sid = str(eid)
+    event = {
+        "id": sid,
+        "name": (deg["nazev"] or "").strip(),
+        "date": (deg["datum"] or "").strip(),
+    }
+    wineries_rows = conn.execute(
+        """
+        SELECT id, name, location_number, token
+        FROM scoretaste_wineries
+        WHERE event_id = ?
+        ORDER BY location_number
+        """,
+        (eid,),
+    ).fetchall()
+    wineries = []
+    for r in wineries_rows:
+        item = {
+            "id": str(r["id"]),
+            "eventId": sid,
+            "name": r["name"],
+            "locationNumber": r["location_number"],
+        }
+        tok = (r["token"] or "").strip()
+        if tok:
+            item["token"] = tok
+        wineries.append(item)
+    wines_rows = conn.execute(
+        """
+        SELECT w.id, w.winery_id, w.label, w.variety, w.predicate, w.vintage, w.description
+        FROM scoretaste_wines w
+        JOIN scoretaste_wineries y ON w.winery_id = y.id
+        WHERE y.event_id = ?
+        ORDER BY w.id
+        """,
+        (eid,),
+    ).fetchall()
+    wines = []
+    for r in wines_rows:
+        w = {
+            "id": str(r["id"]),
+            "wineryId": str(r["winery_id"]),
+            "label": r["label"],
+            "variety": r["variety"],
+            "predicate": (r["predicate"] or "").strip(),
+            "vintage": r["vintage"],
+        }
+        desc = r["description"]
+        if desc is not None and str(desc).strip():
+            w["description"] = str(desc).strip()
+        wines.append(w)
+    return {"event": event, "wineries": wineries, "wines": wines}
+
+
+def _scoretaste_import_json_catalog_to_db(conn, event_id, catalog_dict):
+    """Jednorázový import starého JSON do DB; mapuje stará winery id na nová PK."""
+    eid = int(event_id)
+    normalized = _normalize_event_catalog(catalog_dict, str(eid))
+    id_map = {}
+    for wy in normalized["wineries"]:
+        old_id = str(wy.get("id") or "").strip()
+        name = (wy.get("name") or "").strip()
+        loc = (wy.get("locationNumber") or "").strip()
+        if not name or not loc:
+            continue
+        token = (wy.get("token") or "").strip() or _new_contributor_token()
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO scoretaste_wineries (event_id, name, location_number, token)
+                VALUES (?, ?, ?, ?)
+                """,
+                (eid, name, loc, token),
+            )
+        except Exception:
+            continue
+        new_row_id = cur.lastrowid
+        if old_id:
+            id_map[old_id] = new_row_id
+        id_map[str(new_row_id)] = new_row_id
+    for win in normalized["wines"]:
+        old_wy = str(win.get("wineryId") or "").strip()
+        wid = id_map.get(old_wy)
+        if wid is None:
+            continue
+        label = (win.get("label") or "").strip()
+        variety = (win.get("variety") or "").strip()
+        predicate = (win.get("predicate") or "").strip()
+        vintage = (win.get("vintage") or "").strip()
+        desc = (win.get("description") or "").strip()
+        if not label or not variety or not vintage:
+            continue
+        conn.execute(
+            """
+            INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (wid, label, variety, predicate, vintage, desc or None),
+        )
+
+
+def _maybe_migrate_json_to_db(conn, event_id):
+    """Pokud DB pro event nemá vinařství, zkus import ze starého JSON souboru."""
+    eid = int(event_id)
+    n = conn.execute(
+        "SELECT COUNT(*) AS c FROM scoretaste_wineries WHERE event_id = ?",
+        (eid,),
+    ).fetchone()["c"]
+    if n > 0:
+        return
+    raw = _load_scoretaste_event_catalog_json_file(event_id)
+    if not raw:
+        return
+    _scoretaste_import_json_catalog_to_db(conn, event_id, raw)
+
+
+def _scoretaste_ensure_tokens_in_db(conn, event_id):
+    """Doplní chybějící contributor token u vinařství."""
+    eid = int(event_id)
+    rows = conn.execute(
+        """
+        SELECT id FROM scoretaste_wineries
+        WHERE event_id = ? AND (token IS NULL OR TRIM(token) = '')
+        """,
+        (eid,),
+    ).fetchall()
+    for r in rows:
+        tok = _new_contributor_token()
+        conn.execute(
+            "UPDATE scoretaste_wineries SET token = ? WHERE id = ?",
+            (tok, r["id"]),
+        )
 
 
 def _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row):
     """
-    Načte katalog z public JSON; pokud chybí, vytvoří skeleton z řádku degustace a uloží.
-    Vrací normalizovaný dict.
+    Načte katalog z DB; případně jednorázově importuje starý JSON.
+    Vrací normalizovaný dict pro admin/contributor HTML.
     """
     sid = str(int(event_id))
-    existing = _load_scoretaste_event_catalog_public(event_id)
-    if existing is None:
+    conn = get_connection()
+    try:
+        _maybe_migrate_json_to_db(conn, event_id)
+        _scoretaste_ensure_tokens_in_db(conn, event_id)
+        catalog = _scoretaste_catalog_from_db(conn, event_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if catalog is None:
         nazev = (deg_row["nazev"] or "").strip()
         datum = (deg_row["datum"] or "").strip()
         catalog = {
@@ -170,22 +313,7 @@ def _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row):
             "wineries": [],
             "wines": [],
         }
-        _save_scoretaste_event_catalog_public(event_id, catalog)
-        return _normalize_event_catalog(catalog, sid)
-    normalized = _normalize_event_catalog(existing, sid)
-    if _ensure_winery_tokens(normalized):
-        _save_scoretaste_event_catalog_public(event_id, normalized)
-    return normalized
-
-
-def _next_free_numeric_id_str(existing_ids):
-    mx = 0
-    for x in existing_ids:
-        try:
-            mx = max(mx, int(str(x).strip()))
-        except (ValueError, TypeError):
-            continue
-    return str(mx + 1)
+    return _normalize_event_catalog(catalog, sid)
 
 
 def _winery_location_number_taken(catalog, location_number, exclude_winery_id=None):
@@ -207,18 +335,30 @@ def _new_contributor_token():
     return secrets.token_urlsafe(24)
 
 
-def _ensure_winery_tokens(catalog):
-    """
-    Zajistí, že každé vinařství má contributor token.
-    Vrací True, pokud se katalog změnil.
-    """
-    changed = False
-    for w in catalog.get("wineries") or []:
-        tok = str(w.get("token") or "").strip()
-        if not tok:
-            w["token"] = _new_contributor_token()
-            changed = True
-    return changed
+def _scoretaste_winery_location_taken_db(
+    conn, event_id, location_number, exclude_winery_id=None
+):
+    loc = (location_number or "").strip()
+    if not loc:
+        return False
+    eid = int(event_id)
+    if exclude_winery_id is not None:
+        row = conn.execute(
+            """
+            SELECT id FROM scoretaste_wineries
+            WHERE event_id = ? AND TRIM(location_number) = TRIM(?) AND id != ?
+            """,
+            (eid, loc, int(exclude_winery_id)),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT id FROM scoretaste_wineries
+            WHERE event_id = ? AND TRIM(location_number) = TRIM(?)
+            """,
+            (eid, loc),
+        ).fetchone()
+    return row is not None
 
 
 _LEN_MISTO = 200
@@ -435,6 +575,30 @@ def init_db():
         WHERE odruda_short IS NOT NULL AND odruda_short != UPPER(TRIM(odruda_short))
         """
     )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scoretaste_wineries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            location_number TEXT NOT NULL,
+            token TEXT,
+            UNIQUE (event_id, location_number),
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scoretaste_wines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            winery_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            variety TEXT NOT NULL,
+            predicate TEXT,
+            vintage TEXT NOT NULL,
+            description TEXT,
+            FOREIGN KEY (winery_id) REFERENCES scoretaste_wineries(id) ON DELETE CASCADE
+        )
+    """)
 
     conn.commit()
     conn.close()
@@ -1756,10 +1920,7 @@ def _html_guide_admin_page(event_id, deg_row, catalog):
         wname = escape(str(wy.get("name") or ""))
         raw_wy_name = str(wy.get("name") or "")
         loc_num = str(wy.get("locationNumber") or "").strip()
-        token = str(wy.get("token") or "").strip()
-        if not token:
-            token = _new_contributor_token()
-            wy["token"] = token
+        token = str(wy.get("token") or "").strip() or _new_contributor_token()
         contrib_href = (
             f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=wy_id, _external=True)}"
             f"?{urlencode({'t': token})}"
@@ -1890,137 +2051,130 @@ def guide_admin_catalog(event_id):
         abort(404)
 
     if request.method == "POST":
-        catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
         action = request.form.get("action")
-        if action == "add_winery":
-            name = (request.form.get("winery_name") or "").strip()
-            loc = (request.form.get("winery_location_number") or "").strip()
-            if not name or not loc:
-                flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+        eid = int(event_id)
+        conn = get_connection()
+        try:
+            if action == "add_winery":
+                name = (request.form.get("winery_name") or "").strip()
+                loc = (request.form.get("winery_location_number") or "").strip()
+                if not name or not loc:
+                    flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                if _scoretaste_winery_location_taken_db(conn, event_id, loc):
+                    flash("Číslo sklepu už existuje.", "error")
+                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                conn.execute(
+                    """
+                    INSERT INTO scoretaste_wineries (event_id, name, location_number, token)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (eid, name, loc, _new_contributor_token()),
+                )
+                conn.commit()
                 return redirect(url_for("guide_admin_catalog", event_id=event_id))
-            if _winery_location_number_taken(catalog, loc):
-                flash("Číslo sklepu už existuje.", "error")
+            if action == "add_wine":
+                winery_id = (request.form.get("target_winery_id") or "").strip()
+                if not winery_id or not winery_id.isdigit():
+                    abort(400)
+                row = conn.execute(
+                    "SELECT id FROM scoretaste_wineries WHERE event_id = ? AND id = ?",
+                    (eid, int(winery_id)),
+                ).fetchone()
+                if not row:
+                    abort(400)
+                label = (request.form.get("wine_label") or "").strip()
+                variety = (request.form.get("wine_variety") or "").strip()
+                predicate = (request.form.get("wine_predicate") or "").strip()
+                vintage = (request.form.get("wine_vintage") or "").strip()
+                if not label or not variety or not vintage:
+                    abort(400)
+                desc = (request.form.get("wine_description") or "").strip()
+                conn.execute(
+                    """
+                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (int(winery_id), label, variety, predicate, vintage, desc or None),
+                )
+                conn.commit()
                 return redirect(url_for("guide_admin_catalog", event_id=event_id))
-            new_wid = _next_free_numeric_id_str(
-                w.get("id") for w in catalog["wineries"]
-            )
-            entry = {
-                "id": new_wid,
-                "eventId": str(int(event_id)),
-                "name": name,
-                "locationNumber": loc,
-                "token": _new_contributor_token(),
-            }
-            catalog["wineries"].append(entry)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        if action == "add_wine":
-            winery_id = (request.form.get("target_winery_id") or "").strip()
-            if not winery_id or not any(
-                str(w.get("id")) == winery_id for w in catalog["wineries"]
-            ):
-                abort(400)
-            label = (request.form.get("wine_label") or "").strip()
-            variety = (request.form.get("wine_variety") or "").strip()
-            predicate = (request.form.get("wine_predicate") or "").strip()
-            vintage = (request.form.get("wine_vintage") or "").strip()
-            if not label or not variety or not vintage:
-                abort(400)
-            desc = (request.form.get("wine_description") or "").strip()
-            new_id = _next_free_numeric_id_str(
-                w.get("id") for w in catalog["wines"]
-            )
-            wine = {
-                "id": new_id,
-                "wineryId": winery_id,
-                "label": label,
-                "variety": variety,
-                "predicate": predicate,
-                "vintage": vintage,
-            }
-            if desc:
-                wine["description"] = desc
-            catalog["wines"].append(wine)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        if action == "edit_winery":
-            wid = (request.form.get("edit_winery_id") or "").strip()
-            if not wid or not any(
-                str(w.get("id")) == wid for w in catalog["wineries"]
-            ):
-                abort(400)
-            name = (request.form.get("edit_winery_name") or "").strip()
-            loc = (request.form.get("edit_winery_location_number") or "").strip()
-            if not name or not loc:
-                flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+            if action == "edit_winery":
+                wid = (request.form.get("edit_winery_id") or "").strip()
+                if not wid or not wid.isdigit():
+                    abort(400)
+                name = (request.form.get("edit_winery_name") or "").strip()
+                loc = (request.form.get("edit_winery_location_number") or "").strip()
+                if not name or not loc:
+                    flash("Název vinařství a číslo sklepu jsou povinné.", "error")
+                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                if _scoretaste_winery_location_taken_db(conn, event_id, loc, wid):
+                    flash("Číslo sklepu už existuje.", "error")
+                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                cur = conn.execute(
+                    """
+                    UPDATE scoretaste_wineries
+                    SET name = ?, location_number = ?
+                    WHERE id = ? AND event_id = ?
+                    """,
+                    (name, loc, int(wid), eid),
+                )
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
                 return redirect(url_for("guide_admin_catalog", event_id=event_id))
-            if _winery_location_number_taken(catalog, loc, exclude_winery_id=wid):
-                flash("Číslo sklepu už existuje.", "error")
+            if action == "delete_winery":
+                wid = (request.form.get("delete_winery_id") or "").strip()
+                if not wid or not wid.isdigit():
+                    abort(400)
+                cur = conn.execute(
+                    "DELETE FROM scoretaste_wineries WHERE id = ? AND event_id = ?",
+                    (int(wid), eid),
+                )
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
                 return redirect(url_for("guide_admin_catalog", event_id=event_id))
-            for w in catalog["wineries"]:
-                if str(w.get("id")) == wid:
-                    w["name"] = name
-                    w["locationNumber"] = loc
-                    w.pop("sortOrder", None)
-                    break
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        if action == "delete_winery":
-            wid = (request.form.get("delete_winery_id") or "").strip()
-            if not wid or not any(
-                str(w.get("id")) == wid for w in catalog["wineries"]
-            ):
-                abort(400)
-            catalog["wineries"] = [
-                x for x in catalog["wineries"] if str(x.get("id")) != wid
-            ]
-            catalog["wines"] = [
-                x for x in catalog["wines"] if str(x.get("wineryId")) != wid
-            ]
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        if action == "edit_wine":
-            wine_id = (request.form.get("edit_wine_id") or "").strip()
-            if not wine_id:
-                abort(400)
-            label = (request.form.get("edit_wine_label") or "").strip()
-            variety = (request.form.get("edit_wine_variety") or "").strip()
-            predicate = (request.form.get("edit_wine_predicate") or "").strip()
-            vintage = (request.form.get("edit_wine_vintage") or "").strip()
-            desc = (request.form.get("edit_wine_description") or "").strip()
-            if not label or not variety or not vintage:
-                abort(400)
-            found = False
-            for w in catalog["wines"]:
-                if str(w.get("id")) == wine_id:
-                    w["label"] = label
-                    w["variety"] = variety
-                    w["predicate"] = predicate
-                    w["vintage"] = vintage
-                    w.pop("name", None)
-                    if desc:
-                        w["description"] = desc
-                    else:
-                        w.pop("description", None)
-                    found = True
-                    break
-            if not found:
-                abort(400)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        if action == "delete_wine":
-            wine_id = (request.form.get("delete_wine_id") or "").strip()
-            if not wine_id:
-                abort(400)
-            n_before = len(catalog["wines"])
-            catalog["wines"] = [
-                x for x in catalog["wines"] if str(x.get("id")) != wine_id
-            ]
-            if len(catalog["wines"]) == n_before:
-                abort(400)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            return redirect(url_for("guide_admin_catalog", event_id=event_id))
-        abort(400)
+            if action == "edit_wine":
+                wine_id = (request.form.get("edit_wine_id") or "").strip()
+                if not wine_id or not wine_id.isdigit():
+                    abort(400)
+                label = (request.form.get("edit_wine_label") or "").strip()
+                variety = (request.form.get("edit_wine_variety") or "").strip()
+                predicate = (request.form.get("edit_wine_predicate") or "").strip()
+                vintage = (request.form.get("edit_wine_vintage") or "").strip()
+                desc = (request.form.get("edit_wine_description") or "").strip()
+                if not label or not variety or not vintage:
+                    abort(400)
+                cur = conn.execute(
+                    """
+                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?
+                    WHERE id=? AND winery_id IN (SELECT id FROM scoretaste_wineries WHERE event_id=?)
+                    """,
+                    (label, variety, predicate, vintage, desc or None, int(wine_id), eid),
+                )
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            if action == "delete_wine":
+                wine_id = (request.form.get("delete_wine_id") or "").strip()
+                if not wine_id or not wine_id.isdigit():
+                    abort(400)
+                cur = conn.execute(
+                    """
+                    DELETE FROM scoretaste_wines WHERE id=? AND winery_id IN
+                    (SELECT id FROM scoretaste_wineries WHERE event_id=?)
+                    """,
+                    (int(wine_id), eid),
+                )
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
+                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+            abort(400)
+        finally:
+            conn.close()
 
     catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
     return _html_guide_admin_page(event_id, deg_row, catalog)
@@ -2035,23 +2189,27 @@ def guide_assets(filename):
 
 @app.route("/guide/data/events/<event_id>.json")
 def guide_event_data(event_id):
-    filename = f"{event_id}.json"
-    print("BASE_DIR:", _BASE_DIR)
-    print("DIST_EVENTS:", SCORETASTE_EVENTS_DIR)
-    print("PUBLIC_EVENTS:", SCORETASTE_PUBLIC_EVENTS_DIR)
-    print("REQUESTED_FILE:", filename)
-    print("DIST_EXISTS:", os.path.isdir(SCORETASTE_EVENTS_DIR), os.path.isfile(os.path.join(SCORETASTE_EVENTS_DIR, filename)))
-    print("PUBLIC_EXISTS:", os.path.isdir(SCORETASTE_PUBLIC_EVENTS_DIR), os.path.isfile(os.path.join(SCORETASTE_PUBLIC_EVENTS_DIR, filename)))        
-    for base_dir in (SCORETASTE_EVENTS_DIR, SCORETASTE_PUBLIC_EVENTS_DIR):
-        if not os.path.isdir(base_dir):
-            continue
-        file_path = os.path.join(base_dir, filename)
-        if os.path.isfile(file_path):
-            return send_from_directory(
-                base_dir, filename, mimetype="application/json"
-            )
-    print("EVENT_JSON_NOT_FOUND", flush=True)        
-    abort(404)
+    try:
+        eid = int(str(event_id).strip())
+    except (ValueError, TypeError):
+        abort(404)
+    conn = get_connection()
+    try:
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            abort(404)
+        _maybe_migrate_json_to_db(conn, eid)
+        _scoretaste_ensure_tokens_in_db(conn, eid)
+        catalog = _scoretaste_catalog_from_db(conn, eid)
+        if catalog is None:
+            abort(404)
+        conn.commit()
+    finally:
+        conn.close()
+    return Response(
+        json.dumps(catalog, ensure_ascii=False, indent=2),
+        mimetype="application/json; charset=utf-8",
+    )
 
 
 def _html_guide_contributor_page(event_id, winery, catalog):
@@ -2183,78 +2341,74 @@ def guide_contributor_catalog(event_id, winery_id):
         predicate = (request.form.get("predicate") or "").strip()
         vintage = (request.form.get("vintage") or "").strip()
         desc = (request.form.get("description") or "").strip()
-        if action == "add_wine":
-            if not label or not variety or not vintage:
-                flash("Label, variety a vintage jsou povinné.", "error")
+        winery_db_id = int(winery_id_s)
+        conn = get_connection()
+        try:
+            if action == "add_wine":
+                if not label or not variety or not vintage:
+                    flash("Label, variety a vintage jsou povinné.", "error")
+                    return redirect(
+                        f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                    )
+                row = conn.execute(
+                    "SELECT id FROM scoretaste_wineries WHERE id = ? AND event_id = ?",
+                    (winery_db_id, eid),
+                ).fetchone()
+                if not row:
+                    abort(400)
+                conn.execute(
+                    """
+                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (winery_db_id, label, variety, predicate, vintage, desc or None),
+                )
+                conn.commit()
+                flash("Uloženo.", "success")
                 return redirect(
                     f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
                 )
-            new_id = _next_free_numeric_id_str(w.get("id") for w in catalog["wines"])
-            wine = {
-                "id": new_id,
-                "wineryId": winery_id_s,
-                "label": label,
-                "variety": variety,
-                "predicate": predicate,
-                "vintage": vintage,
-            }
-            if desc:
-                wine["description"] = desc
-            catalog["wines"].append(wine)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            flash("Uloženo.", "success")
-            return redirect(
-                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
-            )
-        if action == "edit_wine":
-            wine_id = (request.form.get("wine_id") or "").strip()
-            if not wine_id or not label or not variety or not vintage:
-                flash("Label, variety a vintage jsou povinné.", "error")
+            if action == "edit_wine":
+                wine_id = (request.form.get("wine_id") or "").strip()
+                if not wine_id or not wine_id.isdigit():
+                    abort(400)
+                if not label or not variety or not vintage:
+                    flash("Label, variety a vintage jsou povinné.", "error")
+                    return redirect(
+                        f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                    )
+                cur = conn.execute(
+                    """
+                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?
+                    WHERE id=? AND winery_id=?
+                    """,
+                    (label, variety, predicate, vintage, desc or None, int(wine_id), winery_db_id),
+                )
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
+                flash("Uloženo.", "success")
                 return redirect(
                     f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
                 )
-            found = False
-            for w in catalog["wines"]:
-                if (
-                    str(w.get("id") or "").strip() == wine_id
-                    and str(w.get("wineryId") or "").strip() == winery_id_s
-                ):
-                    w["label"] = label
-                    w["variety"] = variety
-                    w["predicate"] = predicate
-                    w["vintage"] = vintage
-                    if desc:
-                        w["description"] = desc
-                    else:
-                        w.pop("description", None)
-                    found = True
-                    break
-            if not found:
-                abort(400)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            flash("Uloženo.", "success")
-            return redirect(
-                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
-            )
-        if action == "delete_wine":
-            wine_id = (request.form.get("wine_id") or "").strip()
-            n_before = len(catalog["wines"])
-            catalog["wines"] = [
-                x
-                for x in catalog["wines"]
-                if not (
-                    str(x.get("id") or "").strip() == wine_id
-                    and str(x.get("wineryId") or "").strip() == winery_id_s
+            if action == "delete_wine":
+                wine_id = (request.form.get("wine_id") or "").strip()
+                if not wine_id or not wine_id.isdigit():
+                    abort(400)
+                cur = conn.execute(
+                    "DELETE FROM scoretaste_wines WHERE id=? AND winery_id=?",
+                    (int(wine_id), winery_db_id),
                 )
-            ]
-            if len(catalog["wines"]) == n_before:
-                abort(400)
-            _save_scoretaste_event_catalog_public(event_id, catalog)
-            flash("Smazáno.", "success")
-            return redirect(
-                f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
-            )
-        abort(400)
+                if cur.rowcount == 0:
+                    abort(400)
+                conn.commit()
+                flash("Smazáno.", "success")
+                return redirect(
+                    f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                )
+            abort(400)
+        finally:
+            conn.close()
 
     return _html_guide_contributor_page(event_id, winery, catalog)
 
