@@ -652,10 +652,17 @@ ORDER BY v.cislo
 
 
 def _migrate_scoretaste_wineries_location_nullable(conn):
-    """Starší DB měly location_number NOT NULL; uvolníme NULL pro nepřiřazené číslo sklepu."""
+    """Starší DB měly location_number NOT NULL; uvolníme NULL pro nepřiřazené číslo sklepu.
+
+    Nelze spoléhat na RENAME původní tabulky + DROP: SQLite ponechá FK v ``scoretaste_wines``
+    odkazující na přejmenovanou tabulku (např. ``scoretaste_wineries_loc_mig_old``), takže po DROP
+    vznikne rozbité schéma a INSERT do ``scoretaste_wines`` selže.
+    """
     try:
         rows = conn.execute("PRAGMA table_info(scoretaste_wineries)").fetchall()
     except Exception:
+        return
+    if not rows:
         return
     loc_notnull = None
     for row in rows:
@@ -665,8 +672,21 @@ def _migrate_scoretaste_wineries_location_nullable(conn):
     if loc_notnull != 1:
         return
     old_cols = {r[1] for r in rows}
+
+    has_vwf = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoretaste_visitor_wine_flag'"
+    ).fetchone()
+
     conn.execute("PRAGMA foreign_keys=OFF")
-    conn.execute("ALTER TABLE scoretaste_wineries RENAME TO scoretaste_wineries_loc_mig_old")
+    conn.execute("CREATE TEMP TABLE _st_mig_w AS SELECT * FROM scoretaste_wines")
+    conn.execute("CREATE TEMP TABLE _st_mig_y AS SELECT * FROM scoretaste_wineries")
+    if has_vwf:
+        conn.execute("CREATE TEMP TABLE _st_mig_vwf AS SELECT * FROM scoretaste_visitor_wine_flag")
+
+    conn.execute("DROP TABLE IF EXISTS scoretaste_visitor_wine_flag")
+    conn.execute("DROP TABLE scoretaste_wines")
+    conn.execute("DROP TABLE scoretaste_wineries")
+
     conn.execute(
         """
         CREATE TABLE scoretaste_wineries (
@@ -688,7 +708,7 @@ def _migrate_scoretaste_wineries_location_nullable(conn):
             """
             INSERT INTO scoretaste_wineries (id, event_id, name, location_number, token, note, web, email)
             SELECT id, event_id, name, NULLIF(TRIM(location_number), ''), token, note, web, email
-            FROM scoretaste_wineries_loc_mig_old
+            FROM _st_mig_y
             """
         )
     else:
@@ -696,10 +716,49 @@ def _migrate_scoretaste_wineries_location_nullable(conn):
             """
             INSERT INTO scoretaste_wineries (id, event_id, name, location_number, token, note, web, email)
             SELECT id, event_id, name, NULLIF(TRIM(location_number), ''), token, note, web, NULL
-            FROM scoretaste_wineries_loc_mig_old
+            FROM _st_mig_y
             """
         )
-    conn.execute("DROP TABLE scoretaste_wineries_loc_mig_old")
+
+    conn.execute(
+        """
+        CREATE TABLE scoretaste_wines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            winery_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            variety TEXT NOT NULL,
+            predicate TEXT,
+            vintage TEXT NOT NULL,
+            description TEXT,
+            color TEXT NOT NULL DEFAULT 'white',
+            FOREIGN KEY (winery_id) REFERENCES scoretaste_wineries(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("INSERT INTO scoretaste_wines SELECT * FROM _st_mig_w")
+
+    if has_vwf:
+        conn.execute(
+            """
+            CREATE TABLE scoretaste_visitor_wine_flag (
+                event_id INTEGER NOT NULL,
+                wine_id INTEGER NOT NULL,
+                session_key TEXT NOT NULL,
+                liked INTEGER NOT NULL DEFAULT 0,
+                want_to_buy INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (event_id, wine_id, session_key),
+                FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
+                FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("INSERT INTO scoretaste_visitor_wine_flag SELECT * FROM _st_mig_vwf")
+
+    conn.execute("DROP TABLE IF EXISTS _st_mig_w")
+    conn.execute("DROP TABLE IF EXISTS _st_mig_y")
+    conn.execute("DROP TABLE IF EXISTS _st_mig_vwf")
+
     conn.execute("PRAGMA foreign_keys=ON")
 
 
@@ -2196,17 +2255,34 @@ def _find_winery_id_by_name_ci(conn, event_id, name):
     return int(row[0]) if row else None
 
 
+def _import_csv_delimiter(text):
+    """Vrátí ',' nebo '\\t' podle prvního neprázdného řádku (hlavička)."""
+    first = next((ln for ln in text.splitlines() if (ln or "").strip()), "")
+    if not first:
+        return ","
+    if "\t" in first and first.count("\t") >= first.count(","):
+        return "\t"
+    return ","
+
+
 def _import_scoretaste_csv_rows(conn, event_id, text):
-    """Vrátí (počet_importovaných_řádků, chybová_zpráva_nebo_None)."""
+    """Vrátí (počet_importovaných_řádků, chybová_zpráva_nebo_None).
+
+    Podporuje TSV i CSV; název vína: sloupce ``label`` nebo ``Vzorek`` (case-insensitive).
+    Prázdná odrůda / ročník → výchozí ``none`` / ``1000``.
+    """
     eid = int(event_id)
-    reader = csv.DictReader(io.StringIO(text))
+    if not (text or "").strip():
+        return 0, "Soubor je prázdný."
+    delim = _import_csv_delimiter(text)
+    reader = csv.DictReader(io.StringIO(text), delimiter=delim)
     if not reader.fieldnames:
-        return 0, "CSV nemá hlavičku."
+        return 0, "Soubor nemá hlavičku."
     fnorm = {((k or "").strip().lower()): k for k in reader.fieldnames}
-    required = ("nazev_vinarstvi", "label", "odruda", "rocnik")
-    for r in required:
-        if r not in fnorm:
-            return 0, f"Chybí sloupec: {r}"
+    if "nazev_vinarstvi" not in fnorm:
+        return 0, "Chybí sloupec: nazev_vinarstvi"
+    if "label" not in fnorm and "vzorek" not in fnorm:
+        return 0, "Chybí sloupec: label nebo Vzorek"
     count = 0
     winery_cache = {}
     for row in reader:
@@ -2215,11 +2291,14 @@ def _import_scoretaste_csv_rows(conn, event_id, text):
             return (row.get(k) if k else None) or ""
 
         nv = col("nazev_vinarstvi").strip()
-        lab = col("label").strip()
-        odr = col("odruda").strip()
-        roc = col("rocnik").strip()
-        if not nv or not lab or not odr or not roc:
-            return count, "Každý řádek musí mít vyplněné: nazev_vinarstvi, label, odruda, rocnik."
+        lab = col("label").strip() or col("vzorek").strip()
+        odr = col("odruda").strip() or "none"
+        roc = col("rocnik").strip() or "1000"
+        if not nv or not lab:
+            return (
+                count,
+                "Každý řádek musí mít nazev_vinarstvi a název vína (label nebo Vzorek).",
+            )
         key = nv.lower()
         if key not in winery_cache:
             wid = _find_winery_id_by_name_ci(conn, eid, nv)
@@ -2227,7 +2306,12 @@ def _import_scoretaste_csv_rows(conn, event_id, text):
                 web = col("web").strip() or None
                 em = col("email").strip() or None
                 loc_cell = ""
-                for lk in ("cislo_sklepu", "location_number", "locationnumber"):
+                for lk in (
+                    "id_sklep",
+                    "cislo_sklepu",
+                    "location_number",
+                    "locationnumber",
+                ):
                     if lk in fnorm:
                         loc_cell = col(lk).strip()
                         break
@@ -2822,17 +2906,18 @@ def _html_guide_admin_page(
     <div class="box box-tight">
       <h2 class="admin-section-title">Import CSV</h2>
       <p class="import-hint">
-        Povinné sloupce: <code>nazev_vinarstvi</code>, <code>label</code>, <code>odruda</code>, <code>rocnik</code>.
-        Volitelné: <code>cislo_sklepu</code> / <code>location_number</code> (číslo sklepu; bez sloupce se vinařství založí bez čísla),
-        <code>web</code>, <code>email</code> (u nového vinařství),
-        <code>privlastek</code>, <code>poznamka</code> → <strong>popis vína</strong> (<code>wine.description</code>),
-        <code>barva</code> (bílé / červené / růžové / oranžové nebo bez diakritiky).
+        Soubor může být <strong>TSV</strong> (tabulátor) nebo <strong>CSV</strong> (čárka) — oddělovač se pozná z hlavičky.
+        Povinné: <code>nazev_vinarstvi</code> a název vína jako <code>label</code> <em>nebo</em> <code>Vzorek</code>.
+        Volitelné: <code>ID_sklep</code> / <code>cislo_sklepu</code> / <code>location_number</code> (číslo sklepu u nového vinařství),
+        <code>web</code>, <code>email</code>, <code>odruda</code>, <code>rocnik</code> (prázdné → výchozí <code>none</code> / <code>1000</code>),
+        <code>privlastek</code>, <code>poznamka</code> → popis vína, <code>barva</code>.
         Stejné <code>nazev_vinarstvi</code> na více řádcích = jedno vinařství, více vín.
+        Před větším importem doporučujeme zálohu databáze (postup: <code>docs/db-backup-before-migration.md</code> v projektu).
       </p>
       <form method="post" enctype="multipart/form-data" class="add-winery-row">
         <input type="hidden" name="action" value="import_csv">
         <input type="hidden" name="redirect_tab" value="import">
-        <label>CSV soubor (UTF-8)<input type="file" name="csv_file" accept=".csv,text/csv" required></label>
+        <label>Soubor CSV/TSV (UTF-8)<input type="file" name="csv_file" accept=".csv,.txt,text/csv,text/tab-separated-values" required></label>
         <button type="submit" class="btn btn-primary">Nahrát a importovat</button>
       </form>
     </div>

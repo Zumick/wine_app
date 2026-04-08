@@ -57,3 +57,25 @@ echo "Hotovo: $DEST_DIR/wineapp_backup_${TS}.db"
 5. **Volitelně:** migraci neprovádět, dokud uživatel nepotvrdí, že záloha existuje a cesta je správná.
 
 Obnova: zkopírovat záložní `wineapp_backup_*.db` zpět na `wine.db` (při zastavené aplikaci); pokud jste zálohovali i `-wal`/`-shm`, obnovte je stejně pojmenované vedle `wine.db`, nebo je smažte a nechte SQLite znovu vytvořit (může ztratit necommitnuté změny z WAL).
+
+---
+
+## Lokální vývoj (testovací data): čistá DB bez zálohy
+
+Pro lokální SQLite (`wine.db` dle `db.py`) stačí při rozbitém schématu nebo experimentech s migracemi smazat soubor databáze a nechat aplikaci znovu spustit `init_db`.
+
+1. Zastavte Flask / proces, který drží `wine.db` otevřenou.
+2. V kořeni projektu (nebo tam, kde leží `wine.db`) smažte `wine.db` a případně `wine.db-wal`, `wine.db-shm`.
+3. Spusťte znovu aplikaci (`python app.py` nebo váš příkaz) — při startu se vytvoří nová konzistentní databáze.
+
+**PowerShell (příklad cesta k repozitáři):**
+
+```powershell
+Set-Location "C:\DEV\WEB\WineApp"
+Remove-Item -LiteralPath .\wine.db -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath .\wine.db-wal -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath .\wine.db-shm -ErrorAction SilentlyContinue
+# pak znovu: python app.py
+```
+
+Tím neřešíte produkční zálohování — jde jen o rychlé zotavení vývojového prostředí.
