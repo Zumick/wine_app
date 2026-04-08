@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WineActionToggles } from "../components/WineActionToggles";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
+import { useVisitorActions } from "../context/VisitorActionsContext";
 import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { groupWinesByColorSections } from "../lib/wineSort";
@@ -41,6 +42,8 @@ function WineryWineRow({ wine }: { wine: Wine }) {
   const line2 = wineSecondaryLine(wine);
   const hasDescription = Boolean(wine.description?.trim());
   const hasDetail = wineHasExpandableDetail(wine);
+  const { getStarLevel } = useVisitorActions();
+  const isTop = getStarLevel(wine.id) === 2;
 
   const toggleRow = () => {
     if (hasDetail) setOpen((v) => !v);
@@ -48,7 +51,7 @@ function WineryWineRow({ wine }: { wine: Wine }) {
 
   return (
     <li
-      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}`}
+      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}${isTop ? " visitor-wine-card--top-pick" : ""}`}
       onClick={toggleRow}
       onKeyDown={(e) => {
         if (!hasDetail) return;
@@ -63,9 +66,7 @@ function WineryWineRow({ wine }: { wine: Wine }) {
     >
       <WineActionToggles
         wineId={wine.id}
-        detailChevron={
-          hasDetail ? { open, visible: true } : undefined
-        }
+        expandChevron={hasDetail ? { open } : undefined}
       >
         <span className="visitor-wine-label">{wine.label}</span>
       </WineActionToggles>

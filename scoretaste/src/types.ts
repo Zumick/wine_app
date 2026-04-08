@@ -40,6 +40,7 @@ export type EventCatalog = {
 /** One wine’s persisted flags (wine id is the key in `VisitorActionsBlob.actions`). */
 export type VisitorWineActionRecord = {
   liked: boolean;
+  /** V UI reprezentuje stav „TOP“ (3. stupeň hvězdy); synchronizace s backendem beze změny API. */
   wantToBuy: boolean;
   updatedAt: string;
 };

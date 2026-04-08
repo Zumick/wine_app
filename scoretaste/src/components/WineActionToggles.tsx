@@ -5,61 +5,60 @@ import { t } from "../i18n";
 type Props = {
   wineId: string;
   children: ReactNode;
-  /** Šipka mezi názvem a košíkem; pouze indikátor (ne samostatný klik). */
-  detailChevron?: { open: boolean; visible: boolean };
+  /** Zobrazí stříšku vpravo, pokud řádek má rozbalitelný detail (Moje vína / detail vinařství). */
+  expandChevron?: { open: boolean };
+  /** Nahradí výchozí cyklování hvězdy (např. Moje vína → odstranění s animací). */
+  onStarClick?: (e: MouseEvent<HTMLButtonElement>) => void;
 };
 
-export function WineActionToggles({ wineId, children, detailChevron }: Props) {
-  const { getRecord, setLiked, setWantToBuy } = useVisitorActions();
-  const r = getRecord(wineId);
+function starAriaLabel(level: number): string {
+  switch (level) {
+    case 2:
+      return t("wine.starAriaTop");
+    case 1:
+      return t("wine.starAriaFavorite");
+    default:
+      return t("wine.starAriaNone");
+  }
+}
 
-  const onBasketClick = (e: MouseEvent<HTMLButtonElement>) => {
+export function WineActionToggles({
+  wineId,
+  children,
+  expandChevron,
+  onStarClick: onStarClickOverride,
+}: Props) {
+  const { getStarLevel, cycleStarRating } = useVisitorActions();
+  const level = getStarLevel(wineId);
+
+  const onStarClick = (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    if (r.wantToBuy) {
-      if (window.confirm(t("wine.confirmRemoveFromBasket"))) {
-        setWantToBuy(wineId, false);
-      }
-      return;
+    if (onStarClickOverride) {
+      onStarClickOverride(e);
+    } else {
+      cycleStarRating(wineId);
     }
-    setWantToBuy(wineId, true);
   };
 
   return (
     <div className="visitor-wine-actions-row">
       <button
         type="button"
-        className="visitor-wine-star"
-        onClick={(e) => {
-          e.stopPropagation();
-          setLiked(wineId, !r.liked);
-        }}
-        aria-pressed={r.liked}
-        aria-label={r.liked ? t("wine.savedAria") : t("wine.saveAria")}
+        className={`visitor-wine-star visitor-wine-star--lvl-${level}`}
+        onClick={onStarClick}
+        aria-label={starAriaLabel(level)}
       >
-        {r.liked ? "★" : "☆"}
+        {level === 0 ? "☆" : "★"}
       </button>
       <div className="visitor-wine-title-wrap">{children}</div>
-      {detailChevron?.visible ? (
+      {expandChevron ? (
         <span
-          className={`visitor-wine-detail-chevron${
-            detailChevron.open ? " visitor-wine-detail-chevron-open" : ""
-          }`}
+          className={`visitor-wine-detail-chevron${expandChevron.open ? " visitor-wine-detail-chevron-open" : ""}`}
           aria-hidden
         >
           ▼
         </span>
       ) : null}
-      <button
-        type="button"
-        className="visitor-wine-basket"
-        onClick={onBasketClick}
-        aria-pressed={r.wantToBuy}
-        aria-label={
-          r.wantToBuy ? t("wine.wantToBuyActiveAria") : t("wine.wantToBuyAria")
-        }
-      >
-        🛒
-      </button>
     </div>
   );
 }

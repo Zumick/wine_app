@@ -8,12 +8,14 @@ import {
   type ReactNode,
 } from "react";
 import {
+  cycleWineStarLevel,
   loadVisitorActions,
   markWineryVisited,
   pruneVisitorActionsBlob,
-  setWineLiked,
-  setWineWantToBuy,
+  setWineStarLevel,
   toggleWineryVisited,
+  wineStarLevel,
+  type WineStarLevel,
 } from "../lib/visitorStorage";
 import type {
   EventCatalog,
@@ -23,8 +25,10 @@ import type {
 
 type VisitorActionsValue = {
   blob: VisitorActionsBlob;
-  setLiked: (wineId: string, liked: boolean) => void;
-  setWantToBuy: (wineId: string, wantToBuy: boolean) => void;
+  cycleStarRating: (wineId: string) => void;
+  /** Nastaví přesnou úroveň (0–2); při ≥ 1 označí sklep jako navštívený. */
+  setStarLevel: (wineId: string, level: WineStarLevel) => void;
+  getStarLevel: (wineId: string) => WineStarLevel;
   getRecord: (wineId: string) => VisitorWineActionRecord;
   isWineryVisited: (wineryId: string) => boolean;
   toggleWineryVisited: (wineryId: string) => void;
@@ -62,10 +66,11 @@ export function VisitorActionsProvider({
     return map;
   }, [catalog]);
 
-  const setLiked = useCallback(
-    (wineId: string, liked: boolean) => {
-      let next = setWineLiked(eventId, wineId, liked);
-      if (liked) {
+  const cycleStarRating = useCallback(
+    (wineId: string) => {
+      let next = cycleWineStarLevel(eventId, wineId);
+      const rec = next.actions[wineId];
+      if (rec && wineStarLevel(rec) >= 1) {
         const wineryId = wineryIdByWineId[wineId];
         if (wineryId) {
           next = markWineryVisited(eventId, wineryId);
@@ -76,11 +81,10 @@ export function VisitorActionsProvider({
     [eventId, wineryIdByWineId],
   );
 
-  const setWantToBuy = useCallback(
-    (wineId: string, wantToBuy: boolean) => {
-      let next = setWineWantToBuy(eventId, wineId, wantToBuy);
-      if (wantToBuy) {
-        next = setWineLiked(eventId, wineId, true);
+  const setStarLevel = useCallback(
+    (wineId: string, level: WineStarLevel) => {
+      let next = setWineStarLevel(eventId, wineId, level);
+      if (level >= 1) {
         const wineryId = wineryIdByWineId[wineId];
         if (wineryId) {
           next = markWineryVisited(eventId, wineryId);
@@ -104,6 +108,11 @@ export function VisitorActionsProvider({
     [blob.actions],
   );
 
+  const getStarLevel = useCallback(
+    (wineId: string): WineStarLevel => wineStarLevel(getRecord(wineId)),
+    [getRecord],
+  );
+
   const isWineryVisited = useCallback(
     (wineryId: string): boolean =>
       Boolean(blob.visitedWineries?.[wineryId]),
@@ -120,16 +129,18 @@ export function VisitorActionsProvider({
   const value = useMemo(
     () => ({
       blob,
-      setLiked,
-      setWantToBuy,
+      cycleStarRating,
+      setStarLevel,
+      getStarLevel,
       getRecord,
       isWineryVisited,
       toggleWineryVisited: toggleWineryVisitedCb,
     }),
     [
       blob,
-      setLiked,
-      setWantToBuy,
+      cycleStarRating,
+      setStarLevel,
+      getStarLevel,
       getRecord,
       isWineryVisited,
       toggleWineryVisitedCb,

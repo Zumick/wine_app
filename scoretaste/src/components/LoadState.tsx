@@ -1,10 +1,16 @@
 import type { ReactNode } from "react";
 import { t } from "../i18n";
 
-type Props = { children: ReactNode };
+type Props = { children: ReactNode; className?: string };
 
-export function PageMain({ children }: Props) {
-  return <main className="visitor-page-main">{children}</main>;
+export function PageMain({ children, className }: Props) {
+  return (
+    <main
+      className={`visitor-page-main${className ? ` ${className}` : ""}`}
+    >
+      {children}
+    </main>
+  );
 }
 
 export function LoadingBlock() {

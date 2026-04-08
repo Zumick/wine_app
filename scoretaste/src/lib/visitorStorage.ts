@@ -4,6 +4,29 @@ import type {
   VisitorWineActionRecord,
 } from "../types";
 
+/** 0 = bez, 1 = oblíbené, 2 = TOP (ukládá se jako liked+wantToBuy). */
+export type WineStarLevel = 0 | 1 | 2;
+
+export function wineStarLevel(rec: VisitorWineActionRecord): WineStarLevel {
+  if (rec.liked && rec.wantToBuy) return 2;
+  if (rec.liked) return 1;
+  return 0;
+}
+
+function starLevelToFlags(level: WineStarLevel): {
+  liked: boolean;
+  wantToBuy: boolean;
+} {
+  switch (level) {
+    case 2:
+      return { liked: true, wantToBuy: true };
+    case 1:
+      return { liked: true, wantToBuy: false };
+    default:
+      return { liked: false, wantToBuy: false };
+  }
+}
+
 export function visitorStorageKey(eventId: string): string {
   return `scoretaste:visitor:${eventId}`;
 }
@@ -122,40 +145,17 @@ function getOrCreate(
   );
 }
 
-export function setWineLiked(
+export function setWineStarLevel(
   eventId: string,
   wineId: string,
-  liked: boolean,
+  level: WineStarLevel,
 ): VisitorActionsBlob {
   const blob = loadVisitorActions(eventId);
   const cur = getOrCreate(blob.actions, wineId);
+  const { liked, wantToBuy } = starLevelToFlags(level);
   blob.actions[wineId] = {
     ...cur,
     liked,
-    updatedAt: nowIso(),
-  };
-  saveVisitorActions(blob);
-  return blob;
-}
-
-/** Toggle liked for one wine; returns the new blob. */
-export function toggleWineLiked(
-  eventId: string,
-  wineId: string,
-): VisitorActionsBlob {
-  const cur = loadVisitorActions(eventId).actions[wineId];
-  return setWineLiked(eventId, wineId, !(cur?.liked ?? false));
-}
-
-export function setWineWantToBuy(
-  eventId: string,
-  wineId: string,
-  wantToBuy: boolean,
-): VisitorActionsBlob {
-  const blob = loadVisitorActions(eventId);
-  const cur = getOrCreate(blob.actions, wineId);
-  blob.actions[wineId] = {
-    ...cur,
     wantToBuy,
     updatedAt: nowIso(),
   };
@@ -163,13 +163,14 @@ export function setWineWantToBuy(
   return blob;
 }
 
-/** Toggle want-to-buy for one wine; returns the new blob. */
-export function toggleWineWantToBuy(
+export function cycleWineStarLevel(
   eventId: string,
   wineId: string,
 ): VisitorActionsBlob {
-  const cur = loadVisitorActions(eventId).actions[wineId];
-  return setWineWantToBuy(eventId, wineId, !(cur?.wantToBuy ?? false));
+  const blob = loadVisitorActions(eventId);
+  const cur = getOrCreate(blob.actions, wineId);
+  const next = (((wineStarLevel(cur) + 1) % 3) as WineStarLevel);
+  return setWineStarLevel(eventId, wineId, next);
 }
 
 export function markWineryVisited(
