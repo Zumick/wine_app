@@ -5,7 +5,11 @@ import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
 import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { groupWinesByColorSections } from "../lib/wineSort";
-import { wineSecondaryLine, wineryWebHref } from "../lib/wineDisplay";
+import {
+  wineHasExpandableDetail,
+  wineSecondaryLine,
+  wineryWebHref,
+} from "../lib/wineDisplay";
 import { t } from "../i18n";
 import type { EventCatalog, Wine } from "../types";
 
@@ -30,6 +34,51 @@ function colorSectionTitle(color: string): string {
 
 function wineryHasExpandableDetail(note?: string, web?: string): boolean {
   return Boolean((note && note.trim()) || (web && web.trim()));
+}
+
+function WineryWineRow({ wine }: { wine: Wine }) {
+  const [open, setOpen] = useState(false);
+  const line2 = wineSecondaryLine(wine);
+  const hasDescription = Boolean(wine.description?.trim());
+  const hasDetail = wineHasExpandableDetail(wine);
+
+  const toggleRow = () => {
+    if (hasDetail) setOpen((v) => !v);
+  };
+
+  return (
+    <li
+      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}`}
+      onClick={toggleRow}
+      onKeyDown={(e) => {
+        if (!hasDetail) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setOpen((v) => !v);
+        }
+      }}
+      role={hasDetail ? "button" : undefined}
+      tabIndex={hasDetail ? 0 : undefined}
+      aria-expanded={hasDetail ? open : undefined}
+    >
+      <WineActionToggles
+        wineId={wine.id}
+        detailChevron={
+          hasDetail ? { open, visible: true } : undefined
+        }
+      >
+        <span className="visitor-wine-label">{wine.label}</span>
+      </WineActionToggles>
+      {open && hasDetail ? (
+        <div className="visitor-wine-extra-wrap">
+          {line2 ? <div className="visitor-wine-line2">{line2}</div> : null}
+          {hasDescription ? (
+            <p className="visitor-wine-extra-note">{wine.description?.trim()}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
+  );
 }
 
 export function WineryDetailPage() {
@@ -142,19 +191,7 @@ export function WineryDetailPage() {
               </h3>
               <ul className="visitor-wine-list-block">
                 {groupWines.map((wine: Wine) => (
-                  <li key={wine.id} className="visitor-wine-card">
-                    <WineActionToggles wineId={wine.id}>
-                      <span className="visitor-wine-label">{wine.label}</span>
-                    </WineActionToggles>
-                    {wineSecondaryLine(wine) ? (
-                      <div className="visitor-wine-line2">
-                        {wineSecondaryLine(wine)}
-                      </div>
-                    ) : null}
-                    {wine.description ? (
-                      <p className="visitor-wine-note">{wine.description}</p>
-                    ) : null}
-                  </li>
+                  <WineryWineRow key={wine.id} wine={wine} />
                 ))}
               </ul>
             </section>

@@ -217,7 +217,26 @@ ul {
   font-size: 0.92rem;
   color: #333;
   line-height: 1.5;
+}
+
+.visitor-modal-body-main {
   white-space: pre-line;
+}
+
+.visitor-modal-madeby {
+  margin: 0.85rem 0 0;
+  text-align: center;
+  font-size: 0.88rem;
+  color: #6b7280;
+}
+
+.visitor-modal-madeby a {
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
+.visitor-modal-madeby a:hover {
+  text-decoration: underline;
 }
 
 .visitor-modal-ok {
@@ -509,6 +528,37 @@ ul {
   outline-offset: 2px;
 }
 
+.visitor-wine-detail-chevron {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  font-size: 0.65rem;
+  line-height: 1;
+  color: #9ca3af;
+  margin-right: 0.2rem;
+  transform: rotate(0deg);
+  transition: transform 0.2s ease, color 0.2s ease;
+  user-select: none;
+  pointer-events: none;
+}
+
+.visitor-wine-detail-chevron-open {
+  color: #6b7280;
+  transform: rotate(-180deg);
+}
+
+.visitor-wine-card--expandable {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.visitor-wine-card--expandable:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
 .visitor-wine-title-wrap {
   flex: 1;
   min-width: 0;
@@ -540,6 +590,11 @@ ul {
 .visitor-wine-extra-wrap {
   margin-top: 0.25rem;
   margin-left: calc(var(--visitor-wine-star-size) + var(--visitor-wine-inline-gap));
+}
+
+/* Jedno odsazení pro celý blok; .visitor-wine-line2 má vlastní margin jinde */
+.visitor-wine-extra-wrap .visitor-wine-line2 {
+  margin-left: 0;
 }
 
 .visitor-wine-extra-note {

@@ -7,6 +7,11 @@ export function labelMatchesVariety(wine: Wine): boolean {
   );
 }
 
+/** Zda má víno v průvodci rozbalitelný blok (sekundární řádek a/nebo poznámka). */
+export function wineHasExpandableDetail(wine: Wine): boolean {
+  return Boolean(wineSecondaryLine(wine) || wine.description?.trim());
+}
+
 /** Sekundární řádek: odrůda (pokud ≠ label) · přívlastek · ročník. */
 export function wineSecondaryLine(wine: Wine): string {
   const parts: string[] = [];

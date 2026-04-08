@@ -7,7 +7,7 @@ import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import { wineIdsWithValidWinery } from "../lib/visitorStorage";
-import { wineSecondaryLine } from "../lib/wineDisplay";
+import { wineHasExpandableDetail, wineSecondaryLine } from "../lib/wineDisplay";
 import { compareWinesByColorThenLabel } from "../lib/wineSort";
 import type { EventCatalog, Wine, Winery } from "../types";
 
@@ -32,18 +32,35 @@ function WineShortlistRow({ wine }: { wine: Wine }) {
   const [open, setOpen] = useState(false);
   const line2 = wineSecondaryLine(wine);
   const hasDescription = Boolean(wine.description?.trim());
-  const hasDetail = Boolean(line2 || hasDescription);
+  const hasDetail = wineHasExpandableDetail(wine);
+
+  const toggleRow = () => {
+    if (hasDetail) setOpen((v) => !v);
+  };
+
   return (
-    <li className="visitor-wine-card" style={{ listStyle: "none" }}>
-      <WineActionToggles wineId={wine.id}>
-        <button
-          type="button"
-          className="visitor-wine-label-toggle"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-        >
-          <span className="visitor-wine-label">{wine.label}</span>
-        </button>
+    <li
+      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}`}
+      style={{ listStyle: "none" }}
+      onClick={toggleRow}
+      onKeyDown={(e) => {
+        if (!hasDetail) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setOpen((v) => !v);
+        }
+      }}
+      role={hasDetail ? "button" : undefined}
+      tabIndex={hasDetail ? 0 : undefined}
+      aria-expanded={hasDetail ? open : undefined}
+    >
+      <WineActionToggles
+        wineId={wine.id}
+        detailChevron={
+          hasDetail ? { open, visible: true } : undefined
+        }
+      >
+        <span className="visitor-wine-label">{wine.label}</span>
       </WineActionToggles>
       {open && hasDetail ? (
         <div className="visitor-wine-extra-wrap">
@@ -61,7 +78,7 @@ export function MyWinesPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const catalogState = useSessionEventCatalog();
   const { getRecord } = useVisitorActions();
-  const [segment, setSegment] = useState<Segment>("buy");
+  const [segment, setSegment] = useState<Segment>("saved");
 
   const winesMatchingSegment = useMemo(() => {
     if (catalogState.status !== "ok") return [];

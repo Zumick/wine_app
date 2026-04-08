@@ -144,7 +144,19 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
                 ×
               </button>
             </div>
-            <div className="visitor-modal-body">{t("visitor.infoBody")}</div>
+            <div className="visitor-modal-body">
+              <div className="visitor-modal-body-main">{t("visitor.infoBody")}</div>
+              <p className="visitor-modal-madeby">
+                {t("visitor.infoFooterMadeBy")}{" "}
+                <a
+                  href="https://scoretaste.cz"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  ScoreTaste.cz
+                </a>
+              </p>
+            </div>
             <button
               type="button"
               className="visitor-modal-ok"

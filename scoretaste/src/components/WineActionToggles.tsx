@@ -1,14 +1,20 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useVisitorActions } from "../context/VisitorActionsContext";
 import { t } from "../i18n";
 
-type Props = { wineId: string; children: ReactNode };
+type Props = {
+  wineId: string;
+  children: ReactNode;
+  /** Šipka mezi názvem a košíkem; pouze indikátor (ne samostatný klik). */
+  detailChevron?: { open: boolean; visible: boolean };
+};
 
-export function WineActionToggles({ wineId, children }: Props) {
+export function WineActionToggles({ wineId, children, detailChevron }: Props) {
   const { getRecord, setLiked, setWantToBuy } = useVisitorActions();
   const r = getRecord(wineId);
 
-  const onBasketClick = () => {
+  const onBasketClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
     if (r.wantToBuy) {
       if (window.confirm(t("wine.confirmRemoveFromBasket"))) {
         setWantToBuy(wineId, false);
@@ -23,13 +29,26 @@ export function WineActionToggles({ wineId, children }: Props) {
       <button
         type="button"
         className="visitor-wine-star"
-        onClick={() => setLiked(wineId, !r.liked)}
+        onClick={(e) => {
+          e.stopPropagation();
+          setLiked(wineId, !r.liked);
+        }}
         aria-pressed={r.liked}
         aria-label={r.liked ? t("wine.savedAria") : t("wine.saveAria")}
       >
         {r.liked ? "★" : "☆"}
       </button>
       <div className="visitor-wine-title-wrap">{children}</div>
+      {detailChevron?.visible ? (
+        <span
+          className={`visitor-wine-detail-chevron${
+            detailChevron.open ? " visitor-wine-detail-chevron-open" : ""
+          }`}
+          aria-hidden
+        >
+          ▼
+        </span>
+      ) : null}
       <button
         type="button"
         className="visitor-wine-basket"
