@@ -9,9 +9,10 @@ import {
 } from "react";
 import {
   loadVisitorActions,
+  markWineryVisited,
   pruneVisitorActionsBlob,
-  toggleWineLiked,
-  toggleWineWantToBuy,
+  setWineLiked,
+  setWineWantToBuy,
   toggleWineryVisited,
 } from "../lib/visitorStorage";
 import type {
@@ -22,8 +23,8 @@ import type {
 
 type VisitorActionsValue = {
   blob: VisitorActionsBlob;
-  toggleLiked: (wineId: string) => void;
-  toggleWantToBuy: (wineId: string) => void;
+  setLiked: (wineId: string, liked: boolean) => void;
+  setWantToBuy: (wineId: string, wantToBuy: boolean) => void;
   getRecord: (wineId: string) => VisitorWineActionRecord;
   isWineryVisited: (wineryId: string) => boolean;
   toggleWineryVisited: (wineryId: string) => void;
@@ -53,18 +54,41 @@ export function VisitorActionsProvider({
     setBlob((prev) => pruneVisitorActionsBlob(catalog, prev));
   }, [eventId, catalog]);
 
-  const toggleLiked = useCallback(
-    (wineId: string) => {
-      setBlob(toggleWineLiked(eventId, wineId));
+  const wineryIdByWineId = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const w of catalog?.wines ?? []) {
+      map[w.id] = w.wineryId;
+    }
+    return map;
+  }, [catalog]);
+
+  const setLiked = useCallback(
+    (wineId: string, liked: boolean) => {
+      let next = setWineLiked(eventId, wineId, liked);
+      if (liked) {
+        const wineryId = wineryIdByWineId[wineId];
+        if (wineryId) {
+          next = markWineryVisited(eventId, wineryId);
+        }
+      }
+      setBlob(next);
     },
-    [eventId],
+    [eventId, wineryIdByWineId],
   );
 
-  const toggleWantToBuy = useCallback(
-    (wineId: string) => {
-      setBlob(toggleWineWantToBuy(eventId, wineId));
+  const setWantToBuy = useCallback(
+    (wineId: string, wantToBuy: boolean) => {
+      let next = setWineWantToBuy(eventId, wineId, wantToBuy);
+      if (wantToBuy) {
+        next = setWineLiked(eventId, wineId, true);
+        const wineryId = wineryIdByWineId[wineId];
+        if (wineryId) {
+          next = markWineryVisited(eventId, wineryId);
+        }
+      }
+      setBlob(next);
     },
-    [eventId],
+    [eventId, wineryIdByWineId],
   );
 
   const getRecord = useCallback(
@@ -96,16 +120,16 @@ export function VisitorActionsProvider({
   const value = useMemo(
     () => ({
       blob,
-      toggleLiked,
-      toggleWantToBuy,
+      setLiked,
+      setWantToBuy,
       getRecord,
       isWineryVisited,
       toggleWineryVisited: toggleWineryVisitedCb,
     }),
     [
       blob,
-      toggleLiked,
-      toggleWantToBuy,
+      setLiked,
+      setWantToBuy,
       getRecord,
       isWineryVisited,
       toggleWineryVisitedCb,

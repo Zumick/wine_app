@@ -10,12 +10,16 @@ export function labelMatchesVariety(wine: Wine): boolean {
 /** Sekundární řádek: odrůda (pokud ≠ label) · přívlastek · ročník. */
 export function wineSecondaryLine(wine: Wine): string {
   const parts: string[] = [];
-  if (!labelMatchesVariety(wine)) {
-    parts.push(wine.variety.trim());
+  const variety = wine.variety.trim();
+  if (variety && variety.toLowerCase() !== "none" && !labelMatchesVariety(wine)) {
+    parts.push(variety);
   }
   const pred = wine.predicate.trim();
   if (pred) parts.push(pred);
-  parts.push(wine.vintage.trim());
+  const vintage = wine.vintage.trim();
+  if (vintage && vintage !== "9999" && vintage !== "1000") {
+    parts.push(vintage);
+  }
   return parts.join(" · ");
 }
 

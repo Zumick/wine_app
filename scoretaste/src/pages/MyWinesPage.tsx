@@ -29,12 +29,30 @@ function sortedWines(wines: Wine[]): Wine[] {
 type Segment = "saved" | "buy";
 
 function WineShortlistRow({ wine }: { wine: Wine }) {
+  const [open, setOpen] = useState(false);
+  const line2 = wineSecondaryLine(wine);
+  const hasDescription = Boolean(wine.description?.trim());
+  const hasDetail = Boolean(line2 || hasDescription);
   return (
     <li className="visitor-wine-card" style={{ listStyle: "none" }}>
       <WineActionToggles wineId={wine.id}>
-        <span className="visitor-wine-label">{wine.label}</span>
+        <button
+          type="button"
+          className="visitor-wine-label-toggle"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          <span className="visitor-wine-label">{wine.label}</span>
+        </button>
       </WineActionToggles>
-      <div className="visitor-wine-line2">{wineSecondaryLine(wine)}</div>
+      {open && hasDetail ? (
+        <div className="visitor-wine-extra-wrap">
+          {line2 ? <div className="visitor-wine-line2">{line2}</div> : null}
+          {hasDescription ? (
+            <p className="visitor-wine-extra-note">{wine.description?.trim()}</p>
+          ) : null}
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -103,26 +121,9 @@ export function MyWinesPage() {
           display: "flex",
           gap: "0.35rem",
           marginBottom: "0.75rem",
-          flexWrap: "wrap",
+          justifyContent: "space-between",
         }}
       >
-        <button
-          type="button"
-          role="tab"
-          id="mywines-tab-buy"
-          aria-selected={segment === "buy"}
-          onClick={() => setSegment("buy")}
-          style={{
-            padding: "0.45rem 0.9rem",
-            cursor: "pointer",
-            fontWeight: segment === "buy" ? 700 : 400,
-            border: "1px solid #ccc",
-            borderRadius: "6px",
-            background: segment === "buy" ? "#f5f5f5" : "#fff",
-          }}
-        >
-          {t("myWines.segmentBuy")}
-        </button>
         <button
           type="button"
           role="tab"
@@ -138,7 +139,25 @@ export function MyWinesPage() {
             background: segment === "saved" ? "#f5f5f5" : "#fff",
           }}
         >
-          {t("myWines.segmentSaved")}
+          ★ {t("myWines.segmentSaved")}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="mywines-tab-buy"
+          aria-selected={segment === "buy"}
+          onClick={() => setSegment("buy")}
+          style={{
+            marginLeft: "auto",
+            padding: "0.45rem 0.9rem",
+            cursor: "pointer",
+            fontWeight: segment === "buy" ? 700 : 400,
+            border: "1px solid #ccc",
+            borderRadius: "6px",
+            background: segment === "buy" ? "#f5f5f5" : "#fff",
+          }}
+        >
+          🛒 {t("myWines.segmentBuy")}
         </button>
       </div>
 

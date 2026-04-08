@@ -5,17 +5,17 @@ import { t } from "../i18n";
 type Props = { wineId: string; children: ReactNode };
 
 export function WineActionToggles({ wineId, children }: Props) {
-  const { getRecord, toggleLiked, toggleWantToBuy } = useVisitorActions();
+  const { getRecord, setLiked, setWantToBuy } = useVisitorActions();
   const r = getRecord(wineId);
 
   const onBasketClick = () => {
     if (r.wantToBuy) {
       if (window.confirm(t("wine.confirmRemoveFromBasket"))) {
-        toggleWantToBuy(wineId);
+        setWantToBuy(wineId, false);
       }
       return;
     }
-    toggleWantToBuy(wineId);
+    setWantToBuy(wineId, true);
   };
 
   return (
@@ -23,7 +23,7 @@ export function WineActionToggles({ wineId, children }: Props) {
       <button
         type="button"
         className="visitor-wine-star"
-        onClick={() => toggleLiked(wineId)}
+        onClick={() => setLiked(wineId, !r.liked)}
         aria-pressed={r.liked}
         aria-label={r.liked ? t("wine.savedAria") : t("wine.saveAria")}
       >

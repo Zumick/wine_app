@@ -146,19 +146,13 @@ export function WineryDetailPage() {
                     <WineActionToggles wineId={wine.id}>
                       <span className="visitor-wine-label">{wine.label}</span>
                     </WineActionToggles>
-                    <div className="visitor-wine-line2">
-                      {wineSecondaryLine(wine)}
-                    </div>
+                    {wineSecondaryLine(wine) ? (
+                      <div className="visitor-wine-line2">
+                        {wineSecondaryLine(wine)}
+                      </div>
+                    ) : null}
                     {wine.description ? (
-                      <p
-                        style={{
-                          margin: "0.35rem 0 0",
-                          color: "#333",
-                          fontSize: "0.9rem",
-                        }}
-                      >
-                        {wine.description}
-                      </p>
+                      <p className="visitor-wine-note">{wine.description}</p>
                     ) : null}
                   </li>
                 ))}

@@ -122,16 +122,41 @@ function getOrCreate(
   );
 }
 
-/** Toggle liked for one wine; returns the new blob. */
-export function toggleWineLiked(
+export function setWineLiked(
   eventId: string,
   wineId: string,
+  liked: boolean,
 ): VisitorActionsBlob {
   const blob = loadVisitorActions(eventId);
   const cur = getOrCreate(blob.actions, wineId);
   blob.actions[wineId] = {
     ...cur,
-    liked: !cur.liked,
+    liked,
+    updatedAt: nowIso(),
+  };
+  saveVisitorActions(blob);
+  return blob;
+}
+
+/** Toggle liked for one wine; returns the new blob. */
+export function toggleWineLiked(
+  eventId: string,
+  wineId: string,
+): VisitorActionsBlob {
+  const cur = loadVisitorActions(eventId).actions[wineId];
+  return setWineLiked(eventId, wineId, !(cur?.liked ?? false));
+}
+
+export function setWineWantToBuy(
+  eventId: string,
+  wineId: string,
+  wantToBuy: boolean,
+): VisitorActionsBlob {
+  const blob = loadVisitorActions(eventId);
+  const cur = getOrCreate(blob.actions, wineId);
+  blob.actions[wineId] = {
+    ...cur,
+    wantToBuy,
     updatedAt: nowIso(),
   };
   saveVisitorActions(blob);
@@ -143,15 +168,24 @@ export function toggleWineWantToBuy(
   eventId: string,
   wineId: string,
 ): VisitorActionsBlob {
+  const cur = loadVisitorActions(eventId).actions[wineId];
+  return setWineWantToBuy(eventId, wineId, !(cur?.wantToBuy ?? false));
+}
+
+export function markWineryVisited(
+  eventId: string,
+  wineryId: string,
+): VisitorActionsBlob {
   const blob = loadVisitorActions(eventId);
-  const cur = getOrCreate(blob.actions, wineId);
-  blob.actions[wineId] = {
-    ...cur,
-    wantToBuy: !cur.wantToBuy,
-    updatedAt: nowIso(),
+  if (blob.visitedWineries?.[wineryId]) {
+    return blob;
+  }
+  const out: VisitorActionsBlob = {
+    ...blob,
+    visitedWineries: { ...(blob.visitedWineries ?? {}), [wineryId]: true },
   };
-  saveVisitorActions(blob);
-  return blob;
+  saveVisitorActions(out);
+  return out;
 }
 
 /** Toggle navštívený sklep; vrací nový blob. */
