@@ -10,7 +10,12 @@ export type Winery = {
   name: string;
   /** Číslo sklepu — unikátní v rámci akce */
   locationNumber: string;
+  /** Poznámka pro návštěvníky (admin) */
+  note?: string;
+  web?: string;
 };
+
+export type WineColor = "white" | "red" | "rose" | "orange";
 
 export type Wine = {
   id: string;
@@ -22,6 +27,7 @@ export type Wine = {
   predicate: string;
   vintage: string;
   description?: string;
+  color?: WineColor;
 };
 
 /** Root shape of `/guide/data/events/:eventId.json` */
@@ -51,4 +57,6 @@ export type VisitorActionsBlob = {
   schemaVersion: 1;
   eventId: string;
   actions: Record<string, VisitorWineActionRecord>;
+  /** wineryId → navštívený sklep (jen v tomto zařízení) */
+  visitedWineries?: Record<string, boolean>;
 };

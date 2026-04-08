@@ -1,0 +1,2 @@
+Loga akcí: soubor assets/logo_<id_akce>.png (např. assets/logo_9.png), kořen scoretaste/public/.
+Chybí-li soubor pro akci, zobrazí se assets/logo_def.png (servíruje Flask jako /guide/assets/...).

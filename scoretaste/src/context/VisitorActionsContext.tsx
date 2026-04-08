@@ -12,6 +12,7 @@ import {
   pruneVisitorActionsBlob,
   toggleWineLiked,
   toggleWineWantToBuy,
+  toggleWineryVisited,
 } from "../lib/visitorStorage";
 import type {
   EventCatalog,
@@ -24,6 +25,8 @@ type VisitorActionsValue = {
   toggleLiked: (wineId: string) => void;
   toggleWantToBuy: (wineId: string) => void;
   getRecord: (wineId: string) => VisitorWineActionRecord;
+  isWineryVisited: (wineryId: string) => boolean;
+  toggleWineryVisited: (wineryId: string) => void;
 };
 
 const VisitorActionsContext = createContext<VisitorActionsValue | null>(null);
@@ -77,14 +80,36 @@ export function VisitorActionsProvider({
     [blob.actions],
   );
 
+  const isWineryVisited = useCallback(
+    (wineryId: string): boolean =>
+      Boolean(blob.visitedWineries?.[wineryId]),
+    [blob.visitedWineries],
+  );
+
+  const toggleWineryVisitedCb = useCallback(
+    (wineryId: string) => {
+      setBlob(toggleWineryVisited(eventId, wineryId));
+    },
+    [eventId],
+  );
+
   const value = useMemo(
     () => ({
       blob,
       toggleLiked,
       toggleWantToBuy,
       getRecord,
+      isWineryVisited,
+      toggleWineryVisited: toggleWineryVisitedCb,
     }),
-    [blob, toggleLiked, toggleWantToBuy, getRecord],
+    [
+      blob,
+      toggleLiked,
+      toggleWantToBuy,
+      getRecord,
+      isWineryVisited,
+      toggleWineryVisitedCb,
+    ],
   );
 
   return (

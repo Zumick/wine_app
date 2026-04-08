@@ -1,6 +1,7 @@
 from flask import (
     Flask,
     request,
+    has_request_context,
     redirect,
     flash,
     get_flashed_messages,
@@ -12,18 +13,30 @@ from flask import (
     Response,
 )
 from markupsafe import escape
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlparse, urlunparse
 from db import get_connection
 import csv
 import io
 import os
 import json
 import secrets
+import time
 import hmac
+
+
+def _public_url_scheme_early():
+    return (os.environ.get("PUBLIC_URL_SCHEME") or "https").strip() or "https"
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-nahradit-pro-produkci")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+app.config["PREFERRED_URL_SCHEME"] = _public_url_scheme_early()
+
+
+@app.before_request
+def _apply_legacy_host_redirect():
+    return _legacy_host_redirect_response()
 
 
 @app.route("/assets/degus_logo.png")
@@ -55,6 +68,127 @@ URL_HOME = "/"
 URL_SCORE = "/score"
 URL_GUIDE = "/guide"
 URL_GUIDE_APP_PREFIX = "/guide"
+
+
+def _env_trim(key, default=""):
+    return (os.environ.get(key) or default).strip()
+
+
+def _env_truthy(key, default=False):
+    v = _env_trim(key).lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _public_url_scheme():
+    return _public_url_scheme_early()
+
+
+def primary_domain():
+    """Hlavní značková doména (např. scoretaste.com). Bez schématu."""
+    return _env_trim("PRIMARY_DOMAIN")
+
+
+def czech_domain():
+    """Česká doména (např. scoretaste.cz). Bez schématu."""
+    return _env_trim("CZECH_DOMAIN")
+
+
+def guide_demo_domain():
+    """Volitelná demo subdoména / host pro průvodce — pro budoucí redirecty a dokumentaci."""
+    return _env_trim("GUIDE_DEMO_DOMAIN")
+
+
+def score_demo_domain():
+    """Volitelná demo subdoména / host pro bodovačku — pro budoucí redirecty a dokumentaci."""
+    return _env_trim("SCORE_DEMO_DOMAIN")
+
+
+def _public_base_url_from_config():
+    """
+    Kanonický veřejný základ URL (bez koncového lomítka), výhradně z konfigurace.
+    Pořadí: PUBLIC_BASE_URL → CZECH_DOMAIN → PRIMARY_DOMAIN.
+    """
+    explicit = _env_trim("PUBLIC_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    host = czech_domain() or primary_domain()
+    if host:
+        return f"{_public_url_scheme()}://{host.split('/')[0]}"
+    return ""
+
+
+def app_public_base_url():
+    """
+    Základ pro generování absolutních URL této aplikace (QR, odkazy pro vinaře, e-katalog).
+    Preferuje PUBLIC_BASE_URL / domény z env; jinak aktuální požadavek (Host).
+    """
+    cfg = _public_base_url_from_config()
+    if cfg:
+        return cfg
+    if has_request_context():
+        return (request.url_root or "").rstrip("/")
+    return ""
+
+
+def absolute_public_url(path):
+    """path začíná / (může obsahovat ?query)."""
+    base = app_public_base_url()
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path if base else path
+
+
+def marketing_site_url():
+    """Externí odkaz z loga (veřejný web); pokud není doména v env, relativní úvod /."""
+    d = primary_domain() or czech_domain()
+    if d:
+        host = d.split("/")[0]
+        return f"{_public_url_scheme()}://{host}/"
+    return URL_HOME
+
+
+def _legacy_redirect_source_hosts():
+    hosts = []
+    raw = _env_trim("LEGACY_REDIRECT_HOSTS")
+    if raw:
+        for part in raw.split(","):
+            p = part.strip().lower()
+            if p:
+                hosts.append(p.split(":")[0])
+    if _env_truthy("REDIRECT_DEMO_HOSTS_TO_CANONICAL"):
+        for d in (guide_demo_domain(), score_demo_domain()):
+            if d:
+                hosts.append(d.split(":")[0].lower())
+    return frozenset(hosts)
+
+
+def _legacy_host_redirect_response():
+    """
+    Volitelný 301 z legacy hostů (např. degus.cz) na kanonický PUBLIC_BASE_URL / CZECH_DOMAIN.
+    Zapnuto: ENABLE_LEGACY_HOST_REDIRECT=1 a neprázdný cíl z _public_base_url_from_config().
+    """
+    if not _env_truthy("ENABLE_LEGACY_HOST_REDIRECT"):
+        return None
+    target_base = _public_base_url_from_config()
+    if not target_base:
+        return None
+    allowed = _legacy_redirect_source_hosts()
+    if not allowed:
+        return None
+    host = (request.host or "").split(":")[0].lower()
+    if host not in allowed:
+        return None
+    parts = urlparse(request.url)
+    t = urlparse(target_base + "/")
+    new_url = urlunparse(
+        (t.scheme, t.netloc, parts.path or "/", parts.params, parts.query, parts.fragment)
+    )
+    return redirect(new_url, code=301)
+
 
 # Možné zápisy v DB pro stejný význam (canonical je TYP_AKCE_PRUVODCE)
 _TYP_AKCE_PRUVODCE_DB_VALUES = (TYP_AKCE_PRUVODCE, "průvodce")
@@ -130,6 +264,73 @@ def _load_scoretaste_event_catalog_json_file(event_id):
     return None
 
 
+_SCORETASTE_WINE_COLORS = frozenset(("white", "red", "rose", "orange"))
+
+
+def _norm_scoretaste_wine_color(raw):
+    c = (raw or "").strip().lower()
+    return c if c in _SCORETASTE_WINE_COLORS else "white"
+
+
+def _contrib_variety_from_label(variety, label):
+    v = (variety or "").strip()
+    if v:
+        return v
+    return (label or "").strip()
+
+
+def _contributor_form_row_indices(form):
+    indices = set()
+    for k in form.keys():
+        if k.startswith("row_") and k.endswith("_label"):
+            try:
+                indices.add(int(k[4:-6]))
+            except ValueError:
+                pass
+    return sorted(indices)
+
+
+def _contrib_wine_color_options_html(selected):
+    opts = []
+    for val, lab in (
+        ("white", "Bílé"),
+        ("rose", "Růžové"),
+        ("red", "Červené"),
+        ("orange", "Oranžové"),
+    ):
+        opts.append(
+            f'<option value="{val}"{" selected" if selected == val else ""}>{lab}</option>'
+        )
+    return "".join(opts)
+
+
+def _contrib_wine_row_html(wi, wine_id, label, vintage, wcol, variety, predicate, description):
+    """Jeden řádek vína; wi je index (např. „0“) nebo „ROWIDX“ v šabloně pro JS."""
+    hid = escape(wine_id) if wine_id else ""
+    return (
+        f'<div class="c-wine-row">'
+        f'<input type="hidden" name="row_{wi}_wine_id" value="{hid}">'
+        '<div class="c-wine-line1">'
+        f'<input type="text" class="c-inp c-inp-label" name="row_{wi}_label" '
+        f'value="{escape(label)}" placeholder="Název vína" autocomplete="off">'
+        f'<select class="c-inp c-sel" name="row_{wi}_color" aria-label="Barva">'
+        f"{_contrib_wine_color_options_html(wcol)}"
+        "</select>"
+        f'<input type="text" class="c-inp c-inp-vint" name="row_{wi}_vintage" '
+        f'value="{escape(vintage)}" placeholder="Ročník" autocomplete="off" inputmode="numeric">'
+        '<button type="button" class="c-del" aria-label="Odebrat řádek">🗑️</button>'
+        "</div>"
+        f'<details class="c-more"><summary>Více</summary>'
+        f'<input type="text" class="c-inp" name="row_{wi}_variety" value="{escape(variety)}" '
+        f'placeholder="Odrůda" autocomplete="off">'
+        f'<input type="text" class="c-inp" name="row_{wi}_predicate" value="{escape(predicate)}" '
+        f'placeholder="Přívlastek" autocomplete="off">'
+        f'<textarea class="c-ta" name="row_{wi}_description" placeholder="Popis" rows="2">'
+        f"{escape(description)}</textarea>"
+        "</details></div>"
+    )
+
+
 def _normalize_event_catalog(catalog, event_id_str):
     """Zajistí `event`, `wineries`, `wines` a stringové `event.id`."""
     if not isinstance(catalog, dict):
@@ -162,28 +363,35 @@ def _scoretaste_catalog_from_db(conn, event_id):
     }
     wineries_rows = conn.execute(
         """
-        SELECT id, name, location_number, token
+        SELECT id, name, location_number, token, note, web
         FROM scoretaste_wineries
         WHERE event_id = ?
-        ORDER BY location_number
+        ORDER BY location_number IS NULL, location_number COLLATE NOCASE
         """,
         (eid,),
     ).fetchall()
     wineries = []
     for r in wineries_rows:
+        ln = r["location_number"]
         item = {
             "id": str(r["id"]),
             "eventId": sid,
             "name": r["name"],
-            "locationNumber": r["location_number"],
+            "locationNumber": (ln if ln is not None else ""),
         }
         tok = (r["token"] or "").strip()
         if tok:
             item["token"] = tok
+        note = (r["note"] or "").strip() if r["note"] is not None else ""
+        if note:
+            item["note"] = note
+        web = (r["web"] or "").strip() if r["web"] is not None else ""
+        if web:
+            item["web"] = web
         wineries.append(item)
     wines_rows = conn.execute(
         """
-        SELECT w.id, w.winery_id, w.label, w.variety, w.predicate, w.vintage, w.description
+        SELECT w.id, w.winery_id, w.label, w.variety, w.predicate, w.vintage, w.description, w.color
         FROM scoretaste_wines w
         JOIN scoretaste_wineries y ON w.winery_id = y.id
         WHERE y.event_id = ?
@@ -200,6 +408,7 @@ def _scoretaste_catalog_from_db(conn, event_id):
             "variety": r["variety"],
             "predicate": (r["predicate"] or "").strip(),
             "vintage": r["vintage"],
+            "color": _norm_scoretaste_wine_color(r["color"]),
         }
         desc = r["description"]
         if desc is not None and str(desc).strip():
@@ -217,16 +426,19 @@ def _scoretaste_import_json_catalog_to_db(conn, event_id, catalog_dict):
         old_id = str(wy.get("id") or "").strip()
         name = (wy.get("name") or "").strip()
         loc = (wy.get("locationNumber") or "").strip()
-        if not name or not loc:
+        if not name:
             continue
+        loc_val = loc or None
         token = (wy.get("token") or "").strip() or _new_contributor_token()
+        note = (wy.get("note") or "").strip() or None
+        web = (wy.get("web") or "").strip() or None
         try:
             cur = conn.execute(
                 """
-                INSERT INTO scoretaste_wineries (event_id, name, location_number, token)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO scoretaste_wineries (event_id, name, location_number, token, note, web)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (eid, name, loc, token),
+                (eid, name, loc_val, token, note, web),
             )
         except Exception:
             continue
@@ -244,14 +456,15 @@ def _scoretaste_import_json_catalog_to_db(conn, event_id, catalog_dict):
         predicate = (win.get("predicate") or "").strip()
         vintage = (win.get("vintage") or "").strip()
         desc = (win.get("description") or "").strip()
+        color = _norm_scoretaste_wine_color(win.get("color"))
         if not label or not variety or not vintage:
             continue
         conn.execute(
             """
-            INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description, color)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (wid, label, variety, predicate, vintage, desc or None),
+            (wid, label, variety, predicate, vintage, desc or None, color),
         )
 
 
@@ -438,6 +651,58 @@ ORDER BY v.cislo
 """
 
 
+def _migrate_scoretaste_wineries_location_nullable(conn):
+    """Starší DB měly location_number NOT NULL; uvolníme NULL pro nepřiřazené číslo sklepu."""
+    try:
+        rows = conn.execute("PRAGMA table_info(scoretaste_wineries)").fetchall()
+    except Exception:
+        return
+    loc_notnull = None
+    for row in rows:
+        if row[1] == "location_number":
+            loc_notnull = row[3]
+            break
+    if loc_notnull != 1:
+        return
+    old_cols = {r[1] for r in rows}
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("ALTER TABLE scoretaste_wineries RENAME TO scoretaste_wineries_loc_mig_old")
+    conn.execute(
+        """
+        CREATE TABLE scoretaste_wineries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            location_number TEXT,
+            token TEXT,
+            note TEXT,
+            web TEXT,
+            email TEXT,
+            UNIQUE (event_id, location_number),
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+        )
+        """
+    )
+    if "email" in old_cols:
+        conn.execute(
+            """
+            INSERT INTO scoretaste_wineries (id, event_id, name, location_number, token, note, web, email)
+            SELECT id, event_id, name, NULLIF(TRIM(location_number), ''), token, note, web, email
+            FROM scoretaste_wineries_loc_mig_old
+            """
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO scoretaste_wineries (id, event_id, name, location_number, token, note, web, email)
+            SELECT id, event_id, name, NULLIF(TRIM(location_number), ''), token, note, web, NULL
+            FROM scoretaste_wineries_loc_mig_old
+            """
+        )
+    conn.execute("DROP TABLE scoretaste_wineries_loc_mig_old")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
 def init_db():
     conn = get_connection()
 
@@ -581,8 +846,10 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            location_number TEXT NOT NULL,
+            location_number TEXT,
             token TEXT,
+            note TEXT,
+            web TEXT,
             UNIQUE (event_id, location_number),
             FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
         )
@@ -596,7 +863,37 @@ def init_db():
             predicate TEXT,
             vintage TEXT NOT NULL,
             description TEXT,
+            color TEXT NOT NULL DEFAULT 'white',
             FOREIGN KEY (winery_id) REFERENCES scoretaste_wineries(id) ON DELETE CASCADE
+        )
+    """)
+
+    st_w_cols = {row[1] for row in conn.execute("PRAGMA table_info(scoretaste_wineries)").fetchall()}
+    if "note" not in st_w_cols:
+        conn.execute("ALTER TABLE scoretaste_wineries ADD COLUMN note TEXT")
+    if "web" not in st_w_cols:
+        conn.execute("ALTER TABLE scoretaste_wineries ADD COLUMN web TEXT")
+    st_wo_cols = {row[1] for row in conn.execute("PRAGMA table_info(scoretaste_wines)").fetchall()}
+    if "color" not in st_wo_cols:
+        conn.execute(
+            "ALTER TABLE scoretaste_wines ADD COLUMN color TEXT NOT NULL DEFAULT 'white'"
+        )
+    if "email" not in st_w_cols:
+        conn.execute("ALTER TABLE scoretaste_wineries ADD COLUMN email TEXT")
+
+    _migrate_scoretaste_wineries_location_nullable(conn)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scoretaste_visitor_wine_flag (
+            event_id INTEGER NOT NULL,
+            wine_id INTEGER NOT NULL,
+            session_key TEXT NOT NULL,
+            liked INTEGER NOT NULL DEFAULT 0,
+            want_to_buy INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (event_id, wine_id, session_key),
+            FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
         )
     """)
 
@@ -1389,7 +1686,7 @@ def _html_deg_list_section(
                 f"""
         <div class="deg-row-guide">
             {vyber}
-            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa katalogu</a>
+            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>
             <form method="post" action="{escape(post_url)}" class="deg-del-form">
                 <input type="hidden" name="action" value="smazat">
                 <input type="hidden" name="degustace_id" value="{eid}">
@@ -1624,7 +1921,7 @@ def _html_home_dashboard(deg_bod, deg_pruv, logo_url):
 </head>
 <body>
     <h1 class="home-title-row">
-        <a href="https://degus.cz">
+        <a href="{escape(marketing_site_url())}">
         <img src="{escape(logo_url)}" class="app-logo" alt="Logo degustace vín" width="282" height="113" decoding="async">
         </a>
         <span>Score Taste</span>
@@ -1857,185 +2154,712 @@ def home_guide():
     return _handle_home_typ(TYP_AKCE_PRUVODCE)
 
 
-def _html_guide_admin_page(event_id, deg_row, catalog):
+def _guide_admin_redirect(event_id, winery_id=None, tab=None):
+    base = url_for("guide_admin_catalog", event_id=event_id)
+    q = {}
+    t = (tab or "").strip().lower()
+    if t in ("catalog", "stats", "import"):
+        q["tab"] = t
+    if winery_id is not None:
+        try:
+            wid = int(winery_id)
+            q["winery"] = str(wid)
+        except (TypeError, ValueError):
+            pass
+    if q:
+        return redirect(base + "?" + urlencode(q))
+    return redirect(base)
+
+
+def _norm_csv_wine_color_cell(raw):
+    s = (raw or "").strip().lower()
+    s = s.replace("ě", "e").replace("ř", "r").replace("ů", "u")
+    if s in ("bile", "bílé", "white"):
+        return "white"
+    if s in ("cervene", "červené", "red"):
+        return "red"
+    if s in ("ruzove", "růžové", "rose"):
+        return "rose"
+    if s in ("oranzove", "oranžové", "orange"):
+        return "orange"
+    return _norm_scoretaste_wine_color(raw)
+
+
+def _find_winery_id_by_name_ci(conn, event_id, name):
+    row = conn.execute(
+        """
+        SELECT id FROM scoretaste_wineries
+        WHERE event_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+        """,
+        (int(event_id), name),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def _import_scoretaste_csv_rows(conn, event_id, text):
+    """Vrátí (počet_importovaných_řádků, chybová_zpráva_nebo_None)."""
+    eid = int(event_id)
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return 0, "CSV nemá hlavičku."
+    fnorm = {((k or "").strip().lower()): k for k in reader.fieldnames}
+    required = ("nazev_vinarstvi", "label", "odruda", "rocnik")
+    for r in required:
+        if r not in fnorm:
+            return 0, f"Chybí sloupec: {r}"
+    count = 0
+    winery_cache = {}
+    for row in reader:
+        def col(name):
+            k = fnorm.get(name)
+            return (row.get(k) if k else None) or ""
+
+        nv = col("nazev_vinarstvi").strip()
+        lab = col("label").strip()
+        odr = col("odruda").strip()
+        roc = col("rocnik").strip()
+        if not nv or not lab or not odr or not roc:
+            return count, "Každý řádek musí mít vyplněné: nazev_vinarstvi, label, odruda, rocnik."
+        key = nv.lower()
+        if key not in winery_cache:
+            wid = _find_winery_id_by_name_ci(conn, eid, nv)
+            if wid is None:
+                web = col("web").strip() or None
+                em = col("email").strip() or None
+                loc_cell = ""
+                for lk in ("cislo_sklepu", "location_number", "locationnumber"):
+                    if lk in fnorm:
+                        loc_cell = col(lk).strip()
+                        break
+                loc_val = loc_cell or None
+                cur = conn.execute(
+                    """
+                    INSERT INTO scoretaste_wineries (event_id, name, location_number, token, note, web, email)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (eid, nv, loc_val, _new_contributor_token(), None, web, em),
+                )
+                wid = cur.lastrowid
+            winery_cache[key] = wid
+        wid = winery_cache[key]
+        pred = col("privlastek").strip()
+        poz = col("poznamka").strip()
+        desc = poz or None
+        color = _norm_csv_wine_color_cell(col("barva"))
+        conn.execute(
+            """
+            INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description, color)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (wid, lab, odr, pred, roc, desc, color),
+        )
+        count += 1
+    return count, None
+
+
+def _admin_stats_active_users(conn, event_id):
+    eid = int(event_id)
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT session_key) FROM scoretaste_visitor_wine_flag
+        WHERE event_id = ? AND (liked = 1 OR want_to_buy = 1)
+        """,
+        (eid,),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _admin_stats_wine_rows(conn, event_id):
+    eid = int(event_id)
+    rows = conn.execute(
+        """
+        SELECT w.id, w.label, y.name AS winery_name,
+          COALESCE(SUM(CASE WHEN f.liked = 1 THEN 1 ELSE 0 END), 0) AS likes,
+          COALESCE(SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END), 0) AS want_buy
+        FROM scoretaste_wines w
+        JOIN scoretaste_wineries y ON w.winery_id = y.id
+        LEFT JOIN scoretaste_visitor_wine_flag f
+          ON f.wine_id = w.id AND f.event_id = y.event_id
+        WHERE y.event_id = ?
+        GROUP BY w.id
+        ORDER BY likes DESC, want_buy DESC, w.label COLLATE NOCASE
+        """,
+        (eid,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": r["id"],
+                "label": r["label"],
+                "winery_name": r["winery_name"],
+                "likes": int(r["likes"] or 0),
+                "want_buy": int(r["want_buy"] or 0),
+            }
+        )
+    return out
+
+
+def _admin_tab_url(admin_base, tab, winery_id=None):
+    q = {"tab": tab}
+    if tab == "catalog" and winery_id:
+        q["winery"] = str(winery_id)
+    return admin_base + "?" + urlencode(q)
+
+
+def _admin_tab_from_form():
+    t = (request.form.get("redirect_tab") or "").strip().lower()
+    return t if t in ("catalog", "stats", "import") else "catalog"
+
+
+def _admin_event_readiness(catalog, wines_by_wid):
+    wineries = catalog.get("wineries") or []
+    n_total = len(wineries)
+    n_with_wines = 0
+    n_with_loc = 0
+    n_ready = 0
+    any_missing_loc = False
+    for w in wineries:
+        wid = str(w.get("id") or "").strip()
+        wc = len(wines_by_wid.get(wid, []))
+        has_loc = bool(str(w.get("locationNumber") or "").strip())
+        if not has_loc:
+            any_missing_loc = True
+        if wc > 0:
+            n_with_wines += 1
+        if has_loc:
+            n_with_loc += 1
+        if wc > 0 and has_loc:
+            n_ready += 1
+    return {
+        "n_total": n_total,
+        "n_with_wines": n_with_wines,
+        "n_with_loc": n_with_loc,
+        "n_ready": n_ready,
+        "n_not_ready": n_total - n_ready,
+        "any_missing_loc": any_missing_loc,
+    }
+
+
+def _admin_winery_status_badges_html(wy, wine_count):
+    has_loc = bool(str(wy.get("locationNumber") or "").strip())
+    parts = []
+    if not has_loc:
+        parts.append(
+            '<span class="fill-badge fill-badge-warn">Chybí číslo sklepu</span>'
+        )
+    if wine_count == 0:
+        parts.append('<span class="fill-badge fill-badge-empty">Bez vín</span>')
+    if has_loc and wine_count > 0:
+        parts.append('<span class="fill-badge fill-badge-done">Připraveno</span>')
+    return " ".join(parts)
+
+
+def _admin_wine_color_options(selected):
+    opts = []
+    for val, lab in (
+        ("white", "Bílé"),
+        ("rose", "Růžové"),
+        ("red", "Červené"),
+        ("orange", "Oranžové"),
+    ):
+        opts.append(
+            f'<option value="{val}"{" selected" if selected == val else ""}>{lab}</option>'
+        )
+    return "".join(opts)
+
+
+def _html_guide_admin_page(
+    event_id, deg_row, catalog, selected_winery_id=None, active_tab="catalog"
+):
     ev = catalog["event"]
     title = escape((ev.get("name") or deg_row["nazev"] or "Akce").strip() or "Akce")
-    ev_json_id = escape(str(ev.get("id", "")))
-    ev_json_date = escape(str(ev.get("date", "")))
     preview_href = f"{URL_GUIDE_APP_PREFIX}/e/{int(event_id)}/wineries"
+    visitor_abs = absolute_public_url(preview_href)
+    qr_src = (
+        "https://api.qrserver.com/v1/create-qr-code/?size=120x120&data="
+        + quote(visitor_abs, safe="")
+    )
     guide_h = escape(URL_GUIDE)
     prev_h = escape(preview_href)
+    admin_base = url_for("guide_admin_catalog", event_id=event_id)
     flash_html = ""
     for cat, msg in get_flashed_messages(with_categories=True):
         flash_html += f'<p class="admin-flash admin-flash-{escape(cat)}">{escape(msg)}</p>\n'
+
+    wines_by_wid = {}
+    for w in catalog["wines"]:
+        wid = str(w.get("wineryId") or "").strip()
+        wines_by_wid.setdefault(wid, []).append(w)
+
+    readiness = _admin_event_readiness(catalog, wines_by_wid)
+
+    wineries_list = list(catalog.get("wineries") or [])
+    wineries_sorted = sorted(
+        wineries_list,
+        key=lambda x: (
+            0 if str(x.get("locationNumber") or "").strip() else 1,
+            str(x.get("locationNumber") or "").lower(),
+            str(x.get("name") or "").lower(),
+        ),
+    )
+    wid_set = {str(w.get("id") or "").strip() for w in wineries_list}
+    sel = (selected_winery_id or "").strip()
+    if sel not in wid_set and wineries_sorted:
+        sel = str(wineries_sorted[0].get("id") or "").strip()
+    elif sel not in wid_set:
+        sel = ""
+
+    selected_wy = next(
+        (w for w in wineries_sorted if str(w.get("id") or "").strip() == sel),
+        None,
+    )
+
+    try:
+        deg_datum_fallback = str(deg_row["datum"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        deg_datum_fallback = ""
+    datum_raw = (ev.get("date") or "").strip() or deg_datum_fallback
+    event_date_html = (
+        f'<p class="admin-header-date">{escape(format_datum_cz(datum_raw))}</p>\n'
+        if datum_raw
+        else ""
+    )
+
     head = f"""<!DOCTYPE html>
 <html lang="cs">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Katalog — {title}</title>
+    <title>Správa akce — {title}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; color: #222; }}
-        h1 {{ font-size: 1.25rem; }}
-        .nav {{ margin-bottom: 16px; font-size: 14px; }}
-        .box {{ border: 1px solid #ccc; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; background: #fafafa; }}
-        label {{ display: block; margin: 6px 0; font-size: 14px; }}
-        input[type=text], input[type=number] {{ width: 100%; max-width: 420px; padding: 6px 8px; }}
-        .winery-block {{ border-left: 3px solid #2563eb; padding-left: 10px; margin: 14px 0; }}
-        .wine-row {{ font-size: 13px; margin: 4px 0 4px 12px; color: #333; }}
-        .btn-copy-link {{ margin-left: 6px; }}
-        .copy-link-msg {{ display:none; color:#065f46; font-size:13px; margin:6px 0 0 0; }}
-        .fill-badge {{ display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; }}
-        .fill-badge-done {{ background:#dcfce7; color:#166534; border:1px solid #86efac; }}
-        .fill-badge-empty {{ background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; }}
-        button {{ padding: 6px 12px; cursor: pointer; margin-top: 6px; }}
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: Segoe UI, Arial, sans-serif; margin: 0; color: #1a1a1a; background: #f3f4f6; }}
+        .admin-wrap {{ max-width: 1400px; margin: 0 auto; padding: 16px 20px 32px; }}
+        h1 {{ font-size: 1.35rem; margin: 0 0 12px; }}
+        .nav {{ margin-bottom: 12px; font-size: 14px; }}
+        .nav a {{ color: #1d4ed8; }}
+        .admin-header-table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; table-layout: fixed; }}
+        .admin-header-main {{ vertical-align: top; }}
+        .admin-header-main .nav {{ margin-bottom: 0; }}
+        .admin-header-main h1 {{ margin: 0 0 4px; font-size: 1.35rem; }}
+        .admin-header-date {{ margin: 0 0 8px; font-size: 0.95rem; color: #4b5563; }}
+        .admin-header-flash {{ vertical-align: top; }}
+        .admin-header-qr {{ vertical-align: top; text-align: right; width: 132px; padding-left: 12px; }}
+        .admin-header-qr-stack {{ display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }}
+        .admin-header-qr img {{ display: inline-block; max-width: 120px; height: auto; vertical-align: top; }}
+        .admin-header-host-link {{ font-size: 13px; color: #1d4ed8; text-decoration: none; }}
+        .admin-header-host-link:hover {{ text-decoration: underline; }}
+        .box {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; background: #fff; }}
+        .box-tight h2 {{ margin: 0 0 10px; font-size: 1.05rem; }}
+        .add-winery-row {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }}
+        .add-winery-row label {{ font-size: 13px; display: flex; flex-direction: column; gap: 4px; min-width: 140px; flex: 1; }}
+        .add-winery-row input[type=text] {{ padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%; max-width: 280px; }}
+        .btn {{ padding: 7px 14px; cursor: pointer; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; font-size: 13px; }}
+        .btn-primary {{ background: #2563eb; color: #fff; border-color: #1d4ed8; }}
+        .btn-danger {{ color: #b91c1c; border-color: #fecaca; background: #fef2f2; }}
+        .btn-sm {{ padding: 4px 10px; font-size: 12px; }}
         .admin-flash {{ margin: 8px 0; }}
         .admin-flash-error {{ color: #b91c1c; font-weight: 600; }}
+        .admin-grid {{ display: flex; gap: 16px; align-items: stretch; min-height: 480px; }}
+        .admin-left {{ flex: 0 0 300px; max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; overflow: auto; max-height: calc(100vh - 220px); }}
+        .admin-right {{ flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; padding: 14px 16px; overflow: auto; max-height: calc(100vh - 220px); }}
+        .admin-winery-item {{ border-bottom: 1px solid #e5e7eb; }}
+        .admin-winery-item-link {{
+            display: block; padding: 10px 12px; text-decoration: none; color: inherit; cursor: pointer;
+        }}
+        .admin-winery-item:hover .admin-winery-item-link {{ background: #f9fafb; }}
+        .admin-winery-item-active .admin-winery-item-link {{
+            background: #eef2ff; border-left: 3px solid #4f46e5; padding-left: 9px;
+        }}
+        .admin-winery-item-link:focus-visible {{ outline: 2px solid #4f46e5; outline-offset: -2px; }}
+        .admin-winery-item .loc {{ display: inline-block; min-width: 2rem; padding: 2px 8px; border-radius: 6px; background: #eef2ff; color: #1e3a8a; font-weight: 800; font-size: 12px; margin-right: 8px; vertical-align: middle; }}
+        .admin-winery-item .nm {{ font-weight: 600; font-size: 14px; }}
+        .admin-winery-meta {{ font-size: 12px; color: #6b7280; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+        .fill-badge {{ display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }}
+        .fill-badge-done {{ background: #dcfce7; color: #166534; border: 1px solid #86efac; }}
+        .fill-badge-empty {{ background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }}
+        .fill-badge-warn {{ background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }}
+        .admin-readiness-summary {{ margin-bottom: 14px; }}
+        .admin-readiness-summary-title {{ margin: 0 0 8px; font-size: 1.05rem; font-weight: 700; }}
+        .admin-readiness-summary-list {{ margin: 0; padding-left: 1.25rem; font-size: 14px; line-height: 1.5; }}
+        .admin-publish-warn {{ border-color: #f59e0b; background: #fffbeb; color: #78350f; margin-bottom: 14px; }}
+        .btn-copy-link {{ margin-top: 4px; }}
+        .copy-link-msg {{ display: none; color: #065f46; font-size: 12px; margin: 4px 0 0; }}
+        .admin-right-head {{ display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #e5e7eb; }}
+        .admin-copy-block {{ max-width: 22rem; font-size: 12px; color: #4b5563; }}
+        .copy-link-hint {{ margin: 6px 0 0; line-height: 1.45; }}
+        .admin-meta-block {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; background: #fafafa; }}
+        .admin-meta-form {{ margin: 0; }}
+        .admin-meta-row1 {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; margin-bottom: 10px; }}
+        .admin-meta-lab-loc {{ flex: 0 0 auto; width: 5rem; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }}
+        .admin-meta-inp-loc {{ width: 100%; max-width: 4.25rem; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }}
+        .admin-meta-lab-name {{ flex: 2 1 200px; min-width: 160px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }}
+        .admin-meta-lab-web {{ flex: 2 1 220px; min-width: 180px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }}
+        .admin-meta-lab-name input, .admin-meta-lab-web input {{ width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }}
+        .admin-meta-row2 {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; justify-content: space-between; }}
+        .admin-meta-lab-note {{ flex: 1 1 240px; min-width: 200px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }}
+        .admin-meta-lab-note input {{ width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }}
+        .admin-meta-row2-btns {{ display: flex; gap: 8px; flex-shrink: 0; align-items: center; flex-wrap: wrap; }}
+        .admin-meta-actions {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+        .wine-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+        .wine-table th, .wine-table td {{ border: 1px solid #e5e7eb; padding: 6px 8px; vertical-align: middle; }}
+        .wine-table th {{ background: #f9fafb; font-weight: 700; text-align: left; color: #374151; }}
+        .wine-table input[type=text], .wine-table select {{ width: 100%; min-width: 0; padding: 5px 6px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px; }}
+        .wine-table-wrap {{ overflow-x: auto; }}
+        .wine-add-row {{ background: #f0fdf4; }}
+        .wine-add-row td {{ border-color: #bbf7d0 !important; }}
+        .wine-add-na {{ color: #9ca3af; font-size: 12px; }}
+        .admin-empty {{ color: #6b7280; padding: 24px; text-align: center; }}
+        .admin-section-title {{ font-size: 1rem; margin: 0 0 10px; font-weight: 700; }}
+        .admin-tabs {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; border-bottom: 1px solid #e5e7eb; padding-bottom: 0; }}
+        .admin-tab {{ display: inline-block; padding: 10px 16px; text-decoration: none; color: #374151; border-radius: 8px 8px 0 0; margin-bottom: -1px; border: 1px solid transparent; border-bottom: none; font-weight: 600; font-size: 14px; }}
+        .admin-tab:hover {{ background: #f3f4f6; color: #111; }}
+        .admin-tab-active {{ background: #fff; color: #1d4ed8; border-color: #e5e7eb; border-bottom: 1px solid #fff; }}
+        .stats-summary {{ font-size: 1.05rem; margin: 0 0 14px; font-weight: 600; }}
+        .stats-table {{ width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }}
+        .stats-table th, .stats-table td {{ border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; }}
+        .stats-table th {{ background: #f9fafb; font-weight: 700; }}
+        .stats-table tr:nth-child(even) {{ background: #fafafa; }}
+        .import-hint {{ font-size: 13px; color: #4b5563; line-height: 1.55; margin: 0 0 12px; max-width: 52rem; }}
     </style>
 </head>
 <body>
-    <p class="nav"><a href="{guide_h}">← /guide</a> · <a href="{prev_h}">Otevřít ScoreTaste (seznam vinařství)</a></p>
-    <h1>Správa katalogu — {title}</h1>
-    {flash_html}
-    <div class="box">
-        <p><strong>DB:</strong> id={int(event_id)} · <strong>Událost (JSON):</strong> {ev_json_id} · <strong>Datum:</strong> {ev_json_date}</p>
-    </div>
-    <div class="box">
-        <h2 style="margin-top:0;font-size:1.05rem;">Přidat vinařství</h2>
-        <form method="post">
+    <div class="admin-wrap">
+    <table class="admin-header-table" role="presentation">
+    <tr>
+      <td class="admin-header-main">
+        <p class="nav"><a href="{guide_h}">Přihlášení</a></p>
+      </td>
+      <td class="admin-header-qr" rowspan="3">
+        <div class="admin-header-qr-stack">
+        <img src="{escape(qr_src)}" alt="QR k odkazu Host" width="120" height="120" loading="lazy">
+        <a class="admin-header-host-link" href="{prev_h}">Host</a>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td class="admin-header-main">
+        <h1>Správa akce — {title}</h1>
+{event_date_html}
+      </td>
+    </tr>
+    <tr>
+      <td class="admin-header-main admin-header-flash">
+{flash_html}
+      </td>
+    </tr>
+    </table>
+"""
+    cat_href = escape(_admin_tab_url(admin_base, "catalog", sel or None))
+    stats_href = escape(_admin_tab_url(admin_base, "stats"))
+    imp_href = escape(_admin_tab_url(admin_base, "import"))
+    tc = " admin-tab-active" if active_tab == "catalog" else ""
+    ts = " admin-tab-active" if active_tab == "stats" else ""
+    ti = " admin-tab-active" if active_tab == "import" else ""
+    tabs_html = f"""
+    <nav class="admin-tabs" aria-label="Sekce správy">
+      <a class="admin-tab{tc}" href="{cat_href}">Katalog</a>
+      <a class="admin-tab{ts}" href="{stats_href}">Statistiky</a>
+      <a class="admin-tab{ti}" href="{imp_href}">Import CSV</a>
+    </nav>
+"""
+    rt = escape(active_tab)
+    head_prefix = (
+        head
+        + tabs_html
+    )
+    add_winery_html = f"""    <div class="box box-tight">
+        <h2>Přidat vinařství</h2>
+        <form method="post" class="add-winery-row">
             <input type="hidden" name="action" value="add_winery">
-            <label>Název vinařství *<input type="text" name="winery_name" required autocomplete="off"></label>
-            <label>Číslo sklepu *<input type="text" name="winery_location_number" required autocomplete="off" placeholder="unikátní v rámci akce"></label>
-            <button type="submit">Přidat vinařství</button>
+            <input type="hidden" name="redirect_tab" value="{rt}">
+            <label>Název *<input type="text" name="winery_name" required autocomplete="off"></label>
+            <label>Číslo sklepu <input type="text" name="winery_location_number" autocomplete="off" placeholder="doplníte před publikací"></label>
+            <label>Poznámka<input type="text" name="winery_note" autocomplete="off"></label>
+            <label>Web<input type="text" name="winery_web" autocomplete="off" placeholder="https://…"></label>
+            <button type="submit" class="btn btn-primary">Přidat</button>
         </form>
     </div>
 """
-    parts = [head]
-    wines_by_wid = {}
-    for w in catalog["wines"]:
-        wid = str(w.get("wineryId") or "").strip()
-        wines_by_wid.setdefault(wid, []).append(w)
-    for wy in catalog["wineries"]:
-        wy_id = str(wy.get("id") or "").strip()
-        wname = escape(str(wy.get("name") or ""))
-        raw_wy_name = str(wy.get("name") or "")
-        loc_num = str(wy.get("locationNumber") or "").strip()
-        token = str(wy.get("token") or "").strip() or _new_contributor_token()
-        contrib_href = (
-            f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=wy_id, _external=True)}"
-            f"?{urlencode({'t': token})}"
-        )
-        wine_count = len(wines_by_wid.get(wy_id, []))
-        status_text = "Vyplněno" if wine_count > 0 else "Nevyplněno"
-        status_class = "fill-badge-done" if wine_count > 0 else "fill-badge-empty"
-        loc_disp = escape(loc_num) if loc_num else "—"
-        parts.append(
-            f'<div class="winery-block"><h3 style="margin:0 0 8px 0;font-size:1rem;">{wname} <small>(sklep {loc_disp}, id {escape(wy_id)})</small><span class="fill-badge {status_class}">{status_text}</span> <small>{wine_count} vín</small></h3>'
-        )
-        parts.append(
-            f"""
-        <form method="post" style="margin-bottom:8px;">
-            <input type="hidden" name="action" value="edit_winery">
-            <input type="hidden" name="edit_winery_id" value="{escape(wy_id)}">
-            <label>Název vinařství *<input type="text" name="edit_winery_name" value="{escape(raw_wy_name)}" required autocomplete="off"></label>
-            <label>Číslo sklepu *<input type="text" name="edit_winery_location_number" value="{escape(loc_num)}" required autocomplete="off"></label>
-            <button type="submit">Uložit vinařství</button>
-        </form>
-        <form method="post" style="margin-bottom:12px;">
-            <input type="hidden" name="action" value="delete_winery">
-            <input type="hidden" name="delete_winery_id" value="{escape(wy_id)}">
-            <button type="submit">Smazat vinařství</button>
-        </form>
-        <div style="margin-bottom:12px;">
-            <button
-              type="button"
-              class="btn-copy-link"
-              data-link="{escape(contrib_href)}"
-            >Kopírovat odkaz pro vinaře</button>
-            <p class="copy-link-msg">Odkaz zkopírován. Vložte ho do emailu nebo zprávy vinaři.</p>
-        </div>
-        """
-        )
-        for wine in wines_by_wid.get(wy_id, []):
-            wid_wine = str(wine.get("id") or "").strip()
-            wl = str(wine.get("label") or "").strip()
-            wv = str(wine.get("variety") or "").strip()
-            wp = str(wine.get("predicate") or "").strip()
-            wvin = str(wine.get("vintage") or "").strip()
-            wd = (wine.get("description") or "").strip()
-            sec_bits = [escape(wv)]
-            if wp:
-                sec_bits.append(escape(wp))
-            sec_bits.append(escape(wvin))
-            sec_line = " · ".join(sec_bits)
+    warn_html = ""
+    if readiness["any_missing_loc"]:
+        warn_html = """    <div class="admin-publish-warn box" role="alert">
+      <strong>Upozornění:</strong> Některá vinařství nemají přiřazené číslo sklepu. Akce není plně připravená pro návštěvnické použití, dokud čísla nedoplníte.
+    </div>
+"""
+    summary_html = f"""    <div class="admin-readiness-summary box">
+      <p class="admin-readiness-summary-title">Připravenost akce</p>
+      <ul class="admin-readiness-summary-list">
+        <li>Vinařství celkem: <strong>{readiness["n_total"]}</strong></li>
+        <li>S alespoň jedním vínem: <strong>{readiness["n_with_wines"]}</strong></li>
+        <li>S vyplněným číslem sklepu: <strong>{readiness["n_with_loc"]}</strong></li>
+        <li>Nepřipraveno k publikaci (chybí číslo sklepu nebo vína): <strong>{readiness["n_not_ready"]}</strong></li>
+      </ul>
+    </div>
+"""
+    parts = [head_prefix]
+    if readiness["any_missing_loc"]:
+        parts.append(warn_html)
+    if active_tab == "catalog":
+        parts.append(summary_html)
+        parts.append(add_winery_html)
+        parts.append('<div class="admin-grid">')
+        parts.append('<aside class="admin-left" aria-label="Seznam vinařství">')
+        if not wineries_sorted:
+            parts.append('<p class="admin-empty" style="padding:16px;">Zatím žádná vinařství.</p>')
+        for wy in wineries_sorted:
+            wy_id = str(wy.get("id") or "").strip()
+            wname = escape(str(wy.get("name") or ""))
+            loc_num = str(wy.get("locationNumber") or "").strip()
+            wine_count = len(wines_by_wid.get(wy_id, []))
+            status_badges = _admin_winery_status_badges_html(wy, wine_count)
+            active = " admin-winery-item-active" if wy_id == sel else ""
+            list_href = _admin_tab_url(admin_base, "catalog", wy_id)
+            aria_cur = ' aria-current="true"' if wy_id == sel else ""
+            row_label = escape(
+                f"{loc_num or '—'} — {str(wy.get('name') or '').strip() or 'Vinařství'}"
+            )
+            parts.append(
+                f'<div class="admin-winery-item{active}">'
+                f'<a class="admin-winery-item-link" href="{escape(list_href)}"'
+                f'{aria_cur} aria-label="Upravit katalog: {row_label}">'
+                f'<span class="loc">{escape(loc_num or "—")}</span>'
+                f'<span class="nm">{wname}</span>'
+                f'<div class="admin-winery-meta">'
+                f"{status_badges}"
+                f"<span>{wine_count} vín</span></div></a>"
+                f"</div>"
+            )
+        parts.append("</aside>")
+
+        parts.append('<main class="admin-right">')
+        if not selected_wy:
+            parts.append(
+                '<p class="admin-empty">Vyberte vinařství vlevo nebo přidejte první vinařství.</p>'
+            )
+        else:
+            wy_id = str(selected_wy.get("id") or "").strip()
+            raw_wy_name = str(selected_wy.get("name") or "")
+            loc_num = str(selected_wy.get("locationNumber") or "").strip()
+            wy_note = str(selected_wy.get("note") or "").strip()
+            wy_web = str(selected_wy.get("web") or "").strip()
+            token = str(selected_wy.get("token") or "").strip() or _new_contributor_token()
+            contrib_rel = url_for(
+                "guide_contributor_catalog",
+                event_id=event_id,
+                winery_id=wy_id,
+            )
+            contrib_href = f"{absolute_public_url(contrib_rel)}?{urlencode({'t': token})}"
+            copy_hint = (
+                "Pošlete vinaři odkaz e-mailem nebo zprávou. Otevře mu stránku pro doplnění vín; "
+                "v&nbsp;URL je tajný token — nesdílejte ho veřejně."
+            )
+            parts.append('<div class="admin-right-head">')
+            parts.append(
+                f'<div><span class="loc" style="margin-right:8px;">{escape(loc_num or "—")}</span>'
+                f'<strong style="font-size:1.1rem;">{escape(raw_wy_name)}</strong></div>'
+                f'<div class="admin-copy-block">'
+                f'<button type="button" class="btn btn-sm btn-copy-link" data-link="{escape(contrib_href)}">'
+                f"Kopírovat odkaz pro vinaře</button>"
+                f'<p class="copy-link-msg">Odkaz zkopírován.</p>'
+                f'<p class="copy-link-hint">{copy_hint}</p>'
+                f"</div></div>"
+            )
             parts.append(
                 f"""
-<div class="wine-row" style="margin-bottom:12px;border-bottom:1px solid #eee;padding-bottom:8px;">
-    <div>· <strong>{escape(wl)}</strong> — {sec_line}{" — " + escape(wd) if wd else ""}</div>
-    <form method="post" style="margin-top:6px;">
-        <input type="hidden" name="action" value="edit_wine">
-        <input type="hidden" name="edit_wine_id" value="{escape(wid_wine)}">
-        <label>Název (label) *<input type="text" name="edit_wine_label" value="{escape(wl)}" required autocomplete="off"></label>
-        <label>Odrůda *<input type="text" name="edit_wine_variety" value="{escape(wv)}" required autocomplete="off"></label>
-        <label>Přívlastek<input type="text" name="edit_wine_predicate" value="{escape(wp)}" autocomplete="off"></label>
-        <label>Ročník *<input type="text" name="edit_wine_vintage" value="{escape(wvin)}" required autocomplete="off"></label>
-        <label>Popis<input type="text" name="edit_wine_description" value="{escape(wd)}" autocomplete="off"></label>
-        <button type="submit">Uložit víno</button>
-    </form>
-    <form method="post" style="display:inline;">
-        <input type="hidden" name="action" value="delete_wine">
-        <input type="hidden" name="delete_wine_id" value="{escape(wid_wine)}">
-        <button type="submit">Smazat víno</button>
-    </form>
-</div>
-"""
+            <div class="admin-meta-block">
+            <form id="form-edit-winery" method="post" class="admin-meta-form">
+                <input type="hidden" name="action" value="edit_winery">
+                <input type="hidden" name="edit_winery_id" value="{escape(wy_id)}">
+                <input type="hidden" name="redirect_winery_id" value="{escape(wy_id)}">
+                <input type="hidden" name="redirect_tab" value="{rt}">
+            </form>
+            <form id="form-delete-winery" method="post" onsubmit="return confirm('Opravdu smazat celé vinařství a všechna jeho vína?');">
+                <input type="hidden" name="action" value="delete_winery">
+                <input type="hidden" name="delete_winery_id" value="{escape(wy_id)}">
+                <input type="hidden" name="redirect_tab" value="{rt}">
+            </form>
+            <div class="admin-meta-row1">
+                <label class="admin-meta-lab-loc">Číslo sklepu
+                <input class="admin-meta-inp-loc" form="form-edit-winery" type="text" name="edit_winery_location_number"
+                  value="{escape(loc_num)}" autocomplete="off" placeholder="volitelné"></label>
+                <label class="admin-meta-lab-name">Název vinařství *
+                <input type="text" form="form-edit-winery" name="edit_winery_name" value="{escape(raw_wy_name)}"
+                  required autocomplete="off"></label>
+                <label class="admin-meta-lab-web">Web
+                <input type="text" form="form-edit-winery" name="edit_winery_web" value="{escape(wy_web)}"
+                  autocomplete="off" placeholder="https://…"></label>
+            </div>
+            <div class="admin-meta-row2">
+                <label class="admin-meta-lab-note">Poznámka (návštěvníci)
+                <input type="text" form="form-edit-winery" name="edit_winery_note" value="{escape(wy_note)}"
+                  autocomplete="off"></label>
+                <div class="admin-meta-row2-btns">
+                  <button type="submit" class="btn btn-primary" form="form-edit-winery">Uložit údaje vinařství</button>
+                  <button type="submit" class="btn btn-danger btn-sm" form="form-delete-winery">Smazat vinařství</button>
+                </div>
+            </div>
+            </div>
+            """
             )
-        if not wines_by_wid.get(wy_id):
-            parts.append('<p class="wine-row" style="color:#666;">Zatím žádná vína.</p>')
-        form_add_wine = (
-            f"""
-        <form method="post" style="margin-top:10px;">
-            <input type="hidden" name="action" value="add_wine">
-            <input type="hidden" name="target_winery_id" value="{escape(wy_id)}">
-            <label>Název (label) *<input type="text" name="wine_label" required autocomplete="off"></label>
-            <label>Odrůda *<input type="text" name="wine_variety" required autocomplete="off"></label>
-            <label>Přívlastek<input type="text" name="wine_predicate" autocomplete="off"></label>
-            <label>Ročník *<input type="text" name="wine_vintage" required autocomplete="off"></label>
-            <label>Popis<input type="text" name="wine_description" autocomplete="off"></label>
-            <button type="submit">Přidat víno</button>
-        </form>
-        """
+
+            parts.append('<h3 class="admin-section-title">Vína</h3>')
+            wy_wines = wines_by_wid.get(wy_id, [])
+            parts.append('<div hidden aria-hidden="true">')
+            for wine in wy_wines:
+                wid_wine = str(wine.get("id") or "").strip()
+                parts.append(
+                    f'<form id="wine-edit-{escape(wid_wine)}" method="post"></form>'
+                )
+            parts.append('<form id="wine-add-form" method="post"></form>')
+            parts.append("</div>")
+            parts.append('<div class="wine-table-wrap"><table class="wine-table">')
+            parts.append(
+                "<thead><tr>"
+                "<th>Barva</th><th>Label</th><th>Odrůda</th><th>Přívlastek</th>"
+                "<th>Ročník</th><th>Popis</th><th>Uložit</th><th>Smazat</th>"
+                "</tr></thead><tbody>"
+            )
+
+            for wine in wy_wines:
+                wid_wine = str(wine.get("id") or "").strip()
+                wl = str(wine.get("label") or "").strip()
+                wv = str(wine.get("variety") or "").strip()
+                wp = str(wine.get("predicate") or "").strip()
+                wvin = str(wine.get("vintage") or "").strip()
+                wd = (wine.get("description") or "").strip()
+                wcol = _norm_scoretaste_wine_color(wine.get("color"))
+                fid = escape(wid_wine)
+                parts.append(
+                    f"<tr>"
+                    f'<td><select form="wine-edit-{fid}" name="edit_wine_color" aria-label="Barva">'
+                    f"{_admin_wine_color_options(wcol)}</select></td>"
+                    f'<td><input form="wine-edit-{fid}" type="text" name="edit_wine_label" value="{escape(wl)}" required autocomplete="off"></td>'
+                    f'<td><input form="wine-edit-{fid}" type="text" name="edit_wine_variety" value="{escape(wv)}" required autocomplete="off"></td>'
+                    f'<td><input form="wine-edit-{fid}" type="text" name="edit_wine_predicate" value="{escape(wp)}" autocomplete="off"></td>'
+                    f'<td><input form="wine-edit-{fid}" type="text" name="edit_wine_vintage" value="{escape(wvin)}" required autocomplete="off"></td>'
+                    f'<td><input form="wine-edit-{fid}" type="text" name="edit_wine_description" value="{escape(wd)}" autocomplete="off"></td>'
+                    f'<td>'
+                    f'<input form="wine-edit-{fid}" type="hidden" name="action" value="edit_wine">'
+                    f'<input form="wine-edit-{fid}" type="hidden" name="edit_wine_id" value="{escape(wid_wine)}">'
+                    f'<input form="wine-edit-{fid}" type="hidden" name="redirect_winery_id" value="{escape(wy_id)}">'
+                    f'<input form="wine-edit-{fid}" type="hidden" name="redirect_tab" value="{rt}">'
+                    f'<button form="wine-edit-{fid}" type="submit" class="btn btn-primary btn-sm">Uložit</button>'
+                    f"</td>"
+                    f'<td><form method="post" style="margin:0;" onsubmit="return confirm(\'Smazat toto víno?\');">'
+                    f'<input type="hidden" name="action" value="delete_wine">'
+                    f'<input type="hidden" name="delete_wine_id" value="{escape(wid_wine)}">'
+                    f'<input type="hidden" name="redirect_winery_id" value="{escape(wy_id)}">'
+                    f'<input type="hidden" name="redirect_tab" value="{rt}">'
+                    f'<button type="submit" class="btn btn-danger btn-sm">Smazat</button>'
+                    f"</form></td>"
+                    f"</tr>"
+                )
+
+            parts.append(
+                f"""
+    <tr class="wine-add-row">
+      <td><select form="wine-add-form" name="wine_color" aria-label="Barva">{_admin_wine_color_options("white")}</select></td>
+      <td><input form="wine-add-form" type="text" name="wine_label" required autocomplete="off" aria-label="Label"></td>
+      <td><input form="wine-add-form" type="text" name="wine_variety" required autocomplete="off" aria-label="Odrůda"></td>
+      <td><input form="wine-add-form" type="text" name="wine_predicate" autocomplete="off" aria-label="Přívlastek"></td>
+      <td><input form="wine-add-form" type="text" name="wine_vintage" required autocomplete="off" aria-label="Ročník"></td>
+      <td><input form="wine-add-form" type="text" name="wine_description" autocomplete="off" aria-label="Popis"></td>
+      <td>
+        <input form="wine-add-form" type="hidden" name="action" value="add_wine">
+        <input form="wine-add-form" type="hidden" name="target_winery_id" value="{escape(wy_id)}">
+        <input form="wine-add-form" type="hidden" name="redirect_tab" value="{rt}">
+        <button form="wine-add-form" type="submit" class="btn btn-primary btn-sm">Přidat víno</button>
+      </td>
+      <td class="wine-add-na">—</td>
+    </tr>
+    """
+            )
+            parts.append("</tbody></table></div>")
+
+        parts.append("</main></div>")
+    elif active_tab == "stats":
+        conn = get_connection()
+        try:
+            au = _admin_stats_active_users(conn, event_id)
+            wine_rows = _admin_stats_wine_rows(conn, event_id)
+        finally:
+            conn.close()
+        liked_wines = [r for r in wine_rows if r["likes"] > 0]
+        liked_lines = "".join(
+            f"<li>{escape(r['label'])} — {escape(r['winery_name'])} ({r['likes']}×)</li>"
+            for r in liked_wines
         )
-        parts.append(form_add_wine)
-        parts.append("</div>")
-    if not catalog["wineries"]:
-        parts.append('<p style="color:#666;">Zatím žádná vinařství — přidejte první výše.</p>')
+        stat_body = "".join(
+            f"<tr><td>{escape(r['label'])}</td><td>{escape(r['winery_name'])}</td>"
+            f"<td>{r['likes']}</td><td>{r['want_buy']}</td></tr>"
+            for r in wine_rows
+        )
+        parts.append(
+            f"""
+    <div class="box">
+      <p class="stats-summary">Aktivní uživatelé: {au}</p>
+      <p class="import-hint" style="margin-top:0;">
+        Počítají se návštěvníci (prohlížeč), kteří u alespoň jednoho vína zapnuli <strong>lajk</strong>
+        nebo <strong>chtěl bych koupit</strong> (data se synchronizují z aplikace návštěvníka).
+      </p>
+      <h3 class="admin-section-title">Vína s alespoň jedním lajkem</h3>
+      {"<ul>" + liked_lines + "</ul>" if liked_lines else "<p class=\"admin-empty\" style=\"padding:8px 0;\">Zatím žádné lajky.</p>"}
+      <h3 class="admin-section-title" style="margin-top:18px;">Všechna vína (řazení: lajky ↓, zájem o koupi ↓)</h3>
+      <div style="overflow-x:auto;">
+        <table class="stats-table">
+          <thead><tr><th>Label</th><th>Vinařství</th><th>Počet like</th><th>Počet chtěl koupit</th></tr></thead>
+          <tbody>{stat_body}</tbody>
+        </table>
+      </div>
+    </div>
+"""
+        )
+    elif active_tab == "import":
+        parts.append(
+            f"""
+    <div class="box box-tight">
+      <h2 class="admin-section-title">Import CSV</h2>
+      <p class="import-hint">
+        Povinné sloupce: <code>nazev_vinarstvi</code>, <code>label</code>, <code>odruda</code>, <code>rocnik</code>.
+        Volitelné: <code>cislo_sklepu</code> / <code>location_number</code> (číslo sklepu; bez sloupce se vinařství založí bez čísla),
+        <code>web</code>, <code>email</code> (u nového vinařství),
+        <code>privlastek</code>, <code>poznamka</code> → <strong>popis vína</strong> (<code>wine.description</code>),
+        <code>barva</code> (bílé / červené / růžové / oranžové nebo bez diakritiky).
+        Stejné <code>nazev_vinarstvi</code> na více řádcích = jedno vinařství, více vín.
+      </p>
+      <form method="post" enctype="multipart/form-data" class="add-winery-row">
+        <input type="hidden" name="action" value="import_csv">
+        <input type="hidden" name="redirect_tab" value="import">
+        <label>CSV soubor (UTF-8)<input type="file" name="csv_file" accept=".csv,text/csv" required></label>
+        <button type="submit" class="btn btn-primary">Nahrát a importovat</button>
+      </form>
+    </div>
+"""
+        )
     parts.append(
         """
 <script>
 (() => {
-  const buttons = document.querySelectorAll(".btn-copy-link");
-  buttons.forEach((btn) => {
+  document.querySelectorAll(".btn-copy-link").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const url = btn.getAttribute("data-link") || "";
-      const msg = btn.parentElement ? btn.parentElement.querySelector(".copy-link-msg") : null;
+      const wrap = btn.closest(".admin-winery-item, .admin-copy-block, .admin-right-head") || btn.parentElement;
+      const msg = wrap ? wrap.querySelector(".copy-link-msg") : null;
       if (!url) return;
       try {
         await navigator.clipboard.writeText(url);
-        if (msg) {
-          msg.style.display = "block";
-          setTimeout(() => { msg.style.display = "none"; }, 2200);
-        }
-      } catch (_) {
-        window.prompt("Zkopírujte odkaz ručně:", url);
-      }
+        if (msg) { msg.style.display = "block"; setTimeout(() => { msg.style.display = "none"; }, 2200); }
+      } catch (_) { window.prompt("Zkopírujte odkaz ručně:", url); }
     });
   });
 })();
 </script>
+</div>
+</body></html>
 """
     )
-    parts.append("</body></html>")
     return "".join(parts)
 
 
@@ -2058,21 +2882,25 @@ def guide_admin_catalog(event_id):
             if action == "add_winery":
                 name = (request.form.get("winery_name") or "").strip()
                 loc = (request.form.get("winery_location_number") or "").strip()
-                if not name or not loc:
-                    flash("Název vinařství a číslo sklepu jsou povinné.", "error")
-                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
-                if _scoretaste_winery_location_taken_db(conn, event_id, loc):
+                wnote = (request.form.get("winery_note") or "").strip() or None
+                wweb = (request.form.get("winery_web") or "").strip() or None
+                if not name:
+                    flash("Název vinařství je povinný.", "error")
+                    return _guide_admin_redirect(eid, None, tab=_admin_tab_from_form())
+                loc_val = loc or None
+                if loc and _scoretaste_winery_location_taken_db(conn, event_id, loc):
                     flash("Číslo sklepu už existuje.", "error")
-                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
-                conn.execute(
+                    return _guide_admin_redirect(eid, None, tab=_admin_tab_from_form())
+                cur = conn.execute(
                     """
-                    INSERT INTO scoretaste_wineries (event_id, name, location_number, token)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO scoretaste_wineries (event_id, name, location_number, token, note, web)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (eid, name, loc, _new_contributor_token()),
+                    (eid, name, loc_val, _new_contributor_token(), wnote, wweb),
                 )
+                new_wid = cur.lastrowid
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                return _guide_admin_redirect(eid, new_wid, tab=_admin_tab_from_form())
             if action == "add_wine":
                 winery_id = (request.form.get("target_winery_id") or "").strip()
                 if not winery_id or not winery_id.isdigit():
@@ -2090,39 +2918,45 @@ def guide_admin_catalog(event_id):
                 if not label or not variety or not vintage:
                     abort(400)
                 desc = (request.form.get("wine_description") or "").strip()
+                color = _norm_scoretaste_wine_color(request.form.get("wine_color"))
                 conn.execute(
                     """
-                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description, color)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (int(winery_id), label, variety, predicate, vintage, desc or None),
+                    (int(winery_id), label, variety, predicate, vintage, desc or None, color),
                 )
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                return _guide_admin_redirect(eid, int(winery_id), tab=_admin_tab_from_form())
             if action == "edit_winery":
                 wid = (request.form.get("edit_winery_id") or "").strip()
                 if not wid or not wid.isdigit():
                     abort(400)
                 name = (request.form.get("edit_winery_name") or "").strip()
                 loc = (request.form.get("edit_winery_location_number") or "").strip()
-                if not name or not loc:
-                    flash("Název vinařství a číslo sklepu jsou povinné.", "error")
-                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
-                if _scoretaste_winery_location_taken_db(conn, event_id, loc, wid):
+                wnote = (request.form.get("edit_winery_note") or "").strip() or None
+                wweb = (request.form.get("edit_winery_web") or "").strip() or None
+                rw_flash = (request.form.get("redirect_winery_id") or "").strip()
+                rw_i = int(rw_flash) if rw_flash.isdigit() else None
+                if not name:
+                    flash("Název vinařství je povinný.", "error")
+                    return _guide_admin_redirect(eid, rw_i, tab=_admin_tab_from_form())
+                loc_val = loc or None
+                if loc and _scoretaste_winery_location_taken_db(conn, event_id, loc, wid):
                     flash("Číslo sklepu už existuje.", "error")
-                    return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                    return _guide_admin_redirect(eid, rw_i, tab=_admin_tab_from_form())
                 cur = conn.execute(
                     """
                     UPDATE scoretaste_wineries
-                    SET name = ?, location_number = ?
+                    SET name = ?, location_number = ?, note = ?, web = ?
                     WHERE id = ? AND event_id = ?
                     """,
-                    (name, loc, int(wid), eid),
+                    (name, loc_val, wnote, wweb, int(wid), eid),
                 )
                 if cur.rowcount == 0:
                     abort(400)
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                return _guide_admin_redirect(eid, int(wid), tab=_admin_tab_from_form())
             if action == "delete_winery":
                 wid = (request.form.get("delete_winery_id") or "").strip()
                 if not wid or not wid.isdigit():
@@ -2133,8 +2967,18 @@ def guide_admin_catalog(event_id):
                 )
                 if cur.rowcount == 0:
                     abort(400)
+                row_next = conn.execute(
+                    """
+                    SELECT id FROM scoretaste_wineries
+                    WHERE event_id = ?
+                    ORDER BY location_number IS NULL, location_number COLLATE NOCASE
+                    LIMIT 1
+                    """,
+                    (eid,),
+                ).fetchone()
+                next_wid = int(row_next[0]) if row_next else None
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                return _guide_admin_redirect(eid, next_wid, tab=_admin_tab_from_form())
             if action == "edit_wine":
                 wine_id = (request.form.get("edit_wine_id") or "").strip()
                 if not wine_id or not wine_id.isdigit():
@@ -2144,19 +2988,22 @@ def guide_admin_catalog(event_id):
                 predicate = (request.form.get("edit_wine_predicate") or "").strip()
                 vintage = (request.form.get("edit_wine_vintage") or "").strip()
                 desc = (request.form.get("edit_wine_description") or "").strip()
+                color = _norm_scoretaste_wine_color(request.form.get("edit_wine_color"))
                 if not label or not variety or not vintage:
                     abort(400)
                 cur = conn.execute(
                     """
-                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?
+                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?, color=?
                     WHERE id=? AND winery_id IN (SELECT id FROM scoretaste_wineries WHERE event_id=?)
                     """,
-                    (label, variety, predicate, vintage, desc or None, int(wine_id), eid),
+                    (label, variety, predicate, vintage, desc or None, color, int(wine_id), eid),
                 )
                 if cur.rowcount == 0:
                     abort(400)
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                rw = (request.form.get("redirect_winery_id") or "").strip()
+                rw_i = int(rw) if rw.isdigit() else None
+                return _guide_admin_redirect(eid, rw_i, tab=_admin_tab_from_form())
             if action == "delete_wine":
                 wine_id = (request.form.get("delete_wine_id") or "").strip()
                 if not wine_id or not wine_id.isdigit():
@@ -2171,13 +3018,48 @@ def guide_admin_catalog(event_id):
                 if cur.rowcount == 0:
                     abort(400)
                 conn.commit()
-                return redirect(url_for("guide_admin_catalog", event_id=event_id))
+                rw = (request.form.get("redirect_winery_id") or "").strip()
+                rw_i = int(rw) if rw.isdigit() else None
+                return _guide_admin_redirect(eid, rw_i, tab=_admin_tab_from_form())
+            if action == "import_csv":
+                f = request.files.get("csv_file")
+                if not f or not (getattr(f, "filename", None) or "").strip():
+                    flash("Vyberte CSV soubor.", "error")
+                    return _guide_admin_redirect(eid, None, tab="import")
+                raw = f.read()
+                if not raw:
+                    flash("Soubor je prázdný.", "error")
+                    return _guide_admin_redirect(eid, None, tab="import")
+                try:
+                    text = raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    flash("Soubor musí být UTF-8.", "error")
+                    return _guide_admin_redirect(eid, None, tab="import")
+                n, err = _import_scoretaste_csv_rows(conn, eid, text)
+                if err:
+                    conn.rollback()
+                    flash(err, "error")
+                else:
+                    conn.commit()
+                    flash(f"Importováno {n} vín.", "success")
+                return _guide_admin_redirect(eid, None, tab="import")
             abort(400)
         finally:
             conn.close()
 
     catalog = _ensure_scoretaste_catalog_for_deg_row(event_id, deg_row)
-    return _html_guide_admin_page(event_id, deg_row, catalog)
+    req_w = (request.args.get("winery") or "").strip()
+    selected_winery_id = req_w if req_w.isdigit() else None
+    tab = (request.args.get("tab") or "catalog").strip().lower()
+    if tab not in ("catalog", "stats", "import"):
+        tab = "catalog"
+    return _html_guide_admin_page(
+        event_id,
+        deg_row,
+        catalog,
+        selected_winery_id=selected_winery_id,
+        active_tab=tab,
+    )
 
 
 @app.route("/guide/assets/<path:filename>")
@@ -2212,6 +3094,61 @@ def guide_event_data(event_id):
     )
 
 
+@app.route("/guide/data/events/<int:event_id>/visitor-sync", methods=["POST"])
+def guide_visitor_sync(event_id):
+    eid = int(event_id)
+    data = request.get_json(silent=True) or {}
+    sk = (data.get("sessionKey") or "").strip()
+    if len(sk) < 8 or len(sk) > 256:
+        return jsonify(ok=False, error="sessionKey"), 400
+    wines = data.get("wines")
+    if not isinstance(wines, dict):
+        return jsonify(ok=False, error="wines"), 400
+    conn = get_connection()
+    try:
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            abort(404)
+        conn.execute(
+            "DELETE FROM scoretaste_visitor_wine_flag WHERE event_id = ? AND session_key = ?",
+            (eid, sk),
+        )
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for wid_str, rec in wines.items():
+            ws = str(wid_str).strip()
+            if not ws.isdigit():
+                continue
+            wid = int(ws)
+            row = conn.execute(
+                """
+                SELECT w.id FROM scoretaste_wines w
+                JOIN scoretaste_wineries y ON w.winery_id = y.id
+                WHERE y.event_id = ? AND w.id = ?
+                """,
+                (eid, wid),
+            ).fetchone()
+            if not row:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            liked = bool(rec.get("liked"))
+            want = bool(rec.get("wantToBuy"))
+            if not liked and not want:
+                continue
+            conn.execute(
+                """
+                INSERT INTO scoretaste_visitor_wine_flag
+                (event_id, wine_id, session_key, liked, want_to_buy, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (eid, wid, sk, 1 if liked else 0, 1 if want else 0, now),
+            )
+        conn.commit()
+        return jsonify(ok=True)
+    finally:
+        conn.close()
+
+
 def _html_guide_contributor_page(event_id, winery, catalog):
     ev = catalog["event"]
     event_name = escape((ev.get("name") or "").strip() or f"Akce {event_id}")
@@ -2230,79 +3167,125 @@ def _html_guide_contributor_page(event_id, winery, catalog):
         if str(w.get("wineryId") or "").strip() == winery_id
     ]
     wines = sorted(wines, key=lambda x: str(x.get("label") or "").lower())
-    out = [f"""<!DOCTYPE html>
+
+    row_blocks = []
+    if wines:
+        for i, wine in enumerate(wines):
+            wine_id = str(wine.get("id") or "").strip()
+            label = str(wine.get("label") or "").strip()
+            variety = str(wine.get("variety") or "").strip()
+            predicate = str(wine.get("predicate") or "").strip()
+            vintage = str(wine.get("vintage") or "").strip()
+            description = str(wine.get("description") or "").strip()
+            wcol = _norm_scoretaste_wine_color(wine.get("color"))
+            row_blocks.append(
+                _contrib_wine_row_html(
+                    str(i),
+                    wine_id,
+                    label,
+                    vintage,
+                    wcol,
+                    variety,
+                    predicate,
+                    description,
+                )
+            )
+        next_idx = len(wines)
+    else:
+        row_blocks.append(
+            _contrib_wine_row_html(
+                "0", "", "", "", "white", "", "", ""
+            )
+        )
+        next_idx = 1
+
+    tpl_row = _contrib_wine_row_html(
+        "ROWIDX", "", "", "", "white", "", "", ""
+    )
+    rows_joined = "\n".join(row_blocks)
+
+    out = f"""<!DOCTYPE html>
 <html lang="cs">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vinař — {event_name} / {winery_name}</title>
   <style>
-    body {{ font-family: Arial, sans-serif; max-width: 860px; margin: 22px auto; padding: 0 14px; color:#222; }}
-    h1 {{ font-size: 1.2rem; margin-bottom: 4px; }}
-    .meta {{ color:#555; margin: 0 0 16px 0; }}
-    .box {{ border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:12px; background:#fafafa; }}
-    label {{ display:block; margin:6px 0; font-size:14px; }}
-    input[type=text], textarea {{ width:100%; max-width:580px; padding:6px 8px; }}
-    textarea {{ min-height:70px; resize:vertical; }}
-    button {{ padding:6px 12px; cursor:pointer; margin-top:6px; }}
-    .c-flash {{ margin: 8px 0; font-weight:600; }}
-    .c-flash-error {{ color:#b91c1c; }}
-    .c-flash-success {{ color:#065f46; }}
+    body {{ font-family: system-ui, Arial, sans-serif; margin: 0; color: #1a1a1a; background: #f3f4f6;
+      padding: 0.65rem 0.75rem 5.25rem; max-width: 36rem; margin-left: auto; margin-right: auto;
+      -webkit-text-size-adjust: 100%; }}
+    h1 {{ font-size: 1.15rem; margin: 0 0 0.35rem; font-weight: 700; }}
+    .meta {{ color: #555; margin: 0 0 0.75rem; font-size: 0.88rem; line-height: 1.4; }}
+    .c-flash {{ margin: 0.35rem 0 0.65rem; font-weight: 600; font-size: 0.9rem; }}
+    .c-flash-error {{ color: #b91c1c; }}
+    .c-flash-success {{ color: #065f46; }}
+    #c-main-form {{ display: block; }}
+    .c-wine-list {{ display: flex; flex-direction: column; gap: 0.55rem; }}
+    .c-wine-row {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 0.45rem 0.5rem;
+      background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+    .c-wine-line1 {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }}
+    .c-inp, .c-sel, .c-ta {{ font-size: 16px; padding: 0.45rem 0.5rem; border: 1px solid #d1d5db;
+      border-radius: 8px; background: #fff; }}
+    .c-inp-label {{ flex: 1 1 9rem; min-width: 0; }}
+    .c-sel {{ flex: 0 0 auto; min-width: 5.5rem; }}
+    .c-inp-vint {{ flex: 0 0 4.25rem; width: 4.25rem; }}
+    .c-del {{ flex: 0 0 auto; width: 2.5rem; height: 2.5rem; padding: 0; border: 1px solid #e5e7eb;
+      border-radius: 8px; background: #fafafa; font-size: 1.1rem; line-height: 1; cursor: pointer; }}
+    .c-more {{ margin-top: 0.35rem; }}
+    .c-more summary {{ cursor: pointer; font-size: 0.82rem; font-weight: 600; color: #374151;
+      list-style: none; padding: 0.2rem 0; }}
+    .c-more summary::-webkit-details-marker {{ display: none; }}
+    .c-more[open] summary {{ margin-bottom: 0.35rem; }}
+    .c-more .c-inp, .c-more .c-ta {{ display: block; width: 100%; box-sizing: border-box; margin-top: 0.35rem; }}
+    .c-ta {{ resize: vertical; min-height: 2.5rem; }}
+    .c-add {{ width: 100%; margin-top: 0.35rem; padding: 0.55rem 0.75rem; font-size: 0.95rem;
+      font-weight: 600; border: 1px dashed #9ca3af; border-radius: 10px; background: #fff;
+      color: #1e3a8a; cursor: pointer; }}
+    .c-savebar {{ position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 0.5rem 0.75rem;
+      background: linear-gradient(180deg, transparent, #f3f4f6 28%); border-top: 1px solid #e5e7eb;
+      display: flex; justify-content: center; }}
+    .c-savebar button {{ min-width: 12rem; padding: 0.65rem 1rem; font-size: 1rem; font-weight: 700;
+      border: none; border-radius: 10px; background: #2563eb; color: #fff; cursor: pointer; }}
+    #wine-row-tpl {{ display: none; }}
   </style>
 </head>
 <body>
   <h1>Doplňte vína</h1>
   <p class="meta"><strong>Akce:</strong> {event_name}<br><strong>Vinařství:</strong> {winery_name}</p>
   {flash_html}
-"""]
-    if not wines:
-        out.append('<p class="meta">Zatím nejsou evidována žádná vína.</p>')
-    for wine in wines:
-        wine_id = str(wine.get("id") or "").strip()
-        label = str(wine.get("label") or "").strip()
-        variety = str(wine.get("variety") or "").strip()
-        predicate = str(wine.get("predicate") or "").strip()
-        vintage = str(wine.get("vintage") or "").strip()
-        description = str(wine.get("description") or "").strip()
-        out.append(
-            f"""
-  <div class="box">
-    <form method="post" action="{escape(back_to_self)}">
-      <input type="hidden" name="action" value="edit_wine">
-      <input type="hidden" name="wine_id" value="{escape(wine_id)}">
-      <label>Název (label) *<input type="text" name="label" value="{escape(label)}" required autocomplete="off"></label>
-      <label>Odrůda (variety) *<input type="text" name="variety" value="{escape(variety)}" required autocomplete="off"></label>
-      <label>Přívlastek (predicate)<input type="text" name="predicate" value="{escape(predicate)}" autocomplete="off"></label>
-      <label>Ročník (vintage) *<input type="text" name="vintage" value="{escape(vintage)}" required autocomplete="off"></label>
-      <label>Popis (description)<textarea name="description">{escape(description)}</textarea></label>
-      <button type="submit">Uložit</button>
-    </form>
-    <form method="post" action="{escape(back_to_self)}">
-      <input type="hidden" name="action" value="delete_wine">
-      <input type="hidden" name="wine_id" value="{escape(wine_id)}">
-      <button type="submit">Smazat víno</button>
-    </form>
+  <form id="c-main-form" method="post" action="{escape(back_to_self)}">
+    <input type="hidden" name="action" value="contributor_save_all">
+    <input type="hidden" name="t" value="{escape(token)}">
+    <div id="c-wine-list" class="c-wine-list">
+{rows_joined}
+    </div>
+    <button type="button" class="c-add" id="c-add-wine">+ Přidat víno</button>
+  </form>
+  <template id="wine-row-tpl">{tpl_row}</template>
+  <div class="c-savebar">
+    <button type="submit" form="c-main-form">Uložit vše</button>
   </div>
-"""
-        )
-    out.append(
-        f"""
-  <div class="box">
-    <h2 style="margin:0 0 8px 0; font-size:1rem;">Přidat víno</h2>
-    <form method="post" action="{escape(back_to_self)}">
-      <input type="hidden" name="action" value="add_wine">
-      <label>Název (label) *<input type="text" name="label" required autocomplete="off"></label>
-      <label>Odrůda (variety) *<input type="text" name="variety" required autocomplete="off"></label>
-      <label>Přívlastek (predicate)<input type="text" name="predicate" autocomplete="off"></label>
-      <label>Ročník (vintage) *<input type="text" name="vintage" required autocomplete="off"></label>
-      <label>Popis (description)<textarea name="description"></textarea></label>
-      <button type="submit">Uložit</button>
-    </form>
-  </div>
+  <script>
+(function() {{
+  const list = document.getElementById("c-wine-list");
+  const tpl = document.getElementById("wine-row-tpl");
+  let nextIdx = {next_idx};
+  function bindRow(row) {{
+    const del = row.querySelector(".c-del");
+    if (del) del.addEventListener("click", function() {{ row.remove(); }});
+  }}
+  list.querySelectorAll(".c-wine-row").forEach(bindRow);
+  document.getElementById("c-add-wine").addEventListener("click", function() {{
+    const html = tpl.innerHTML.replace(/ROWIDX/g, String(nextIdx));
+    nextIdx += 1;
+    list.insertAdjacentHTML("beforeend", html);
+    bindRow(list.lastElementChild);
+  }});
+}})();
+  </script>
 </body>
 </html>"""
-    )
-    return "".join(out)
+    return out
 
 
 @app.route("/guide/contribute/<event_id>/<winery_id>", methods=["GET", "POST"])
@@ -2329,7 +3312,7 @@ def guide_contributor_catalog(event_id, winery_id):
     if not winery:
         abort(404)
 
-    tok_qs = (request.args.get("t") or "").strip()
+    tok_qs = (request.args.get("t") or request.form.get("t") or "").strip()
     tok_expected = str(winery.get("token") or "").strip()
     if not tok_qs or not tok_expected or not hmac.compare_digest(tok_expected, tok_qs):
         abort(403)
@@ -2337,16 +3320,95 @@ def guide_contributor_catalog(event_id, winery_id):
     if request.method == "POST":
         action = (request.form.get("action") or "").strip()
         label = (request.form.get("label") or "").strip()
-        variety = (request.form.get("variety") or "").strip()
+        variety = _contrib_variety_from_label(request.form.get("variety"), label)
         predicate = (request.form.get("predicate") or "").strip()
         vintage = (request.form.get("vintage") or "").strip()
         desc = (request.form.get("description") or "").strip()
         winery_db_id = int(winery_id_s)
         conn = get_connection()
         try:
+            if action == "contributor_save_all":
+                row_ix = _contributor_form_row_indices(request.form)
+                row = conn.execute(
+                    "SELECT id FROM scoretaste_wineries WHERE id = ? AND event_id = ?",
+                    (winery_db_id, eid),
+                ).fetchone()
+                if not row:
+                    abort(400)
+                keep_ids = []
+                for i in row_ix:
+                    label_i = (request.form.get(f"row_{i}_label") or "").strip()
+                    vintage_i = (request.form.get(f"row_{i}_vintage") or "").strip()
+                    if not label_i or not vintage_i:
+                        continue
+                    variety_i = _contrib_variety_from_label(
+                        request.form.get(f"row_{i}_variety"), label_i
+                    )
+                    predicate_i = (request.form.get(f"row_{i}_predicate") or "").strip()
+                    desc_i = (request.form.get(f"row_{i}_description") or "").strip()
+                    color_i = _norm_scoretaste_wine_color(
+                        request.form.get(f"row_{i}_color")
+                    )
+                    wine_id_i = (request.form.get(f"row_{i}_wine_id") or "").strip()
+                    if wine_id_i and wine_id_i.isdigit():
+                        cur = conn.execute(
+                            """
+                            UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?, color=?
+                            WHERE id=? AND winery_id=?
+                            """,
+                            (
+                                label_i,
+                                variety_i,
+                                predicate_i,
+                                vintage_i,
+                                desc_i or None,
+                                color_i,
+                                int(wine_id_i),
+                                winery_db_id,
+                            ),
+                        )
+                        if cur.rowcount == 0:
+                            abort(400)
+                        keep_ids.append(int(wine_id_i))
+                    else:
+                        cur = conn.execute(
+                            """
+                            INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description, color)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                winery_db_id,
+                                label_i,
+                                variety_i,
+                                predicate_i,
+                                vintage_i,
+                                desc_i or None,
+                                color_i,
+                            ),
+                        )
+                        keep_ids.append(cur.lastrowid)
+                if keep_ids:
+                    placeholders = ",".join("?" * len(keep_ids))
+                    conn.execute(
+                        f"""
+                        DELETE FROM scoretaste_wines
+                        WHERE winery_id=? AND id NOT IN ({placeholders})
+                        """,
+                        (winery_db_id, *keep_ids),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM scoretaste_wines WHERE winery_id=?",
+                        (winery_db_id,),
+                    )
+                conn.commit()
+                flash("Uloženo.", "success")
+                return redirect(
+                    f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
+                )
             if action == "add_wine":
-                if not label or not variety or not vintage:
-                    flash("Label, variety a vintage jsou povinné.", "error")
+                if not label or not vintage:
+                    flash("Název a ročník jsou povinné.", "error")
                     return redirect(
                         f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
                     )
@@ -2356,12 +3418,13 @@ def guide_contributor_catalog(event_id, winery_id):
                 ).fetchone()
                 if not row:
                     abort(400)
+                color = _norm_scoretaste_wine_color(request.form.get("color"))
                 conn.execute(
                     """
-                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO scoretaste_wines (winery_id, label, variety, predicate, vintage, description, color)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (winery_db_id, label, variety, predicate, vintage, desc or None),
+                    (winery_db_id, label, variety, predicate, vintage, desc or None, color),
                 )
                 conn.commit()
                 flash("Uloženo.", "success")
@@ -2372,17 +3435,18 @@ def guide_contributor_catalog(event_id, winery_id):
                 wine_id = (request.form.get("wine_id") or "").strip()
                 if not wine_id or not wine_id.isdigit():
                     abort(400)
-                if not label or not variety or not vintage:
-                    flash("Label, variety a vintage jsou povinné.", "error")
+                if not label or not vintage:
+                    flash("Název a ročník jsou povinné.", "error")
                     return redirect(
                         f"{url_for('guide_contributor_catalog', event_id=event_id, winery_id=winery_id_s)}?{urlencode({'t': tok_qs})}"
                     )
+                color = _norm_scoretaste_wine_color(request.form.get("color"))
                 cur = conn.execute(
                     """
-                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?
+                    UPDATE scoretaste_wines SET label=?, variety=?, predicate=?, vintage=?, description=?, color=?
                     WHERE id=? AND winery_id=?
                     """,
-                    (label, variety, predicate, vintage, desc or None, int(wine_id), winery_db_id),
+                    (label, variety, predicate, vintage, desc or None, color, int(wine_id), winery_db_id),
                 )
                 if cur.rowcount == 0:
                     abort(400)
@@ -3404,7 +4468,7 @@ def detail(id):
     katalog_mobile_url = ""
     katalog_top_qr_src = ""
     if rezim == "katalog":
-        katalog_mobile_url = request.url_root.rstrip("/") + f"/mobile-katalog/{id}"
+        katalog_mobile_url = app_public_base_url() + f"/mobile-katalog/{id}"
         katalog_tisk_html = f'<a class="btn btn-primary btn-sm" href="/katalog_tisk/{id}" target="_blank">Tisk katalogu</a>'
         katalog_ekatalog_html = (
             f'<a class="btn btn-sm" href="{escape(katalog_mobile_url)}" target="_blank" rel="noopener">E-katalog</a>'
@@ -4733,7 +5797,7 @@ def detail(id):
     if rezim == "nastaveni":
         h_lb, h_mx = _hodnoceni_labels_maxes_from_deg(degustace)
         h_tok = (degustace["hodnoceni_token"] or "").strip() if degustace["hodnoceni_token"] else ""
-        base_h = request.url_root.rstrip("/")
+        base_h = app_public_base_url()
         html += '<div class="settings-panel" id="settings-tabs-root">'
         html += (
             '<div class="settings-tablist" role="tablist">'
@@ -5338,7 +6402,7 @@ def detail(id):
         komise_qr_block = ""
         h_tok_k = (degustace["hodnoceni_token"] or "").strip()
         if h_tok_k:
-            base_h_q = request.url_root.rstrip("/")
+            base_h_q = app_public_base_url()
             k_eff_q = max(1, min(n_kom, komise_sel))
             mob_u_q = f"{base_h_q}/hodnoceni/{id}/{k_eff_q}?t={quote(h_tok_k, safe='')}"
             qr_u_q = f"https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={quote(mob_u_q, safe='')}"
@@ -6946,7 +8010,7 @@ def katalog_tisk(id):
     poradi_map = {v["id"]: i + 1 for i, v in enumerate(poradi_all)}
 
     sheet_w = "210mm" if fmt == "A4" else "148mm"
-    mobile_url = request.url_root.rstrip("/") + f"/mobile-katalog/{id}"
+    mobile_url = app_public_base_url() + f"/mobile-katalog/{id}"
     mobile_qr = f"https://api.qrserver.com/v1/create-qr-code/?size=140x140&data={quote(mobile_url, safe='')}"
     font_pt = degustace["katalog_font_pt"]
     try:

@@ -1,16 +1,35 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WineActionToggles } from "../components/WineActionToggles";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
 import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
+import { groupWinesByColorSections } from "../lib/wineSort";
+import { wineSecondaryLine, wineryWebHref } from "../lib/wineDisplay";
 import { t } from "../i18n";
-import { wineSecondaryLine } from "../lib/wineDisplay";
 import type { EventCatalog, Wine } from "../types";
 
 function winesForWinery(catalog: EventCatalog, wineryId: string): Wine[] {
-  return catalog.wines
-    .filter((w) => w.wineryId === wineryId)
-    .sort((a, b) => a.label.localeCompare(b.label, "cs"));
+  return catalog.wines.filter((w) => w.wineryId === wineryId);
+}
+
+function colorSectionTitle(color: string): string {
+  switch (color) {
+    case "white":
+      return t("winery.colorWhiteWines");
+    case "rose":
+      return t("winery.colorRoseWines");
+    case "red":
+      return t("winery.colorRedWines");
+    case "orange":
+      return t("winery.colorOrangeWines");
+    default:
+      return t("winery.colorWhiteWines");
+  }
+}
+
+function wineryHasExpandableDetail(note?: string, web?: string): boolean {
+  return Boolean((note && note.trim()) || (web && web.trim()));
 }
 
 export function WineryDetailPage() {
@@ -19,6 +38,7 @@ export function WineryDetailPage() {
     wineryId: string;
   }>();
   const state = useSessionEventCatalog();
+  const [detailOpen, setDetailOpen] = useState(false);
 
   if (!eventId || !wineryId) {
     return (
@@ -58,35 +78,94 @@ export function WineryDetailPage() {
   }
 
   const wines = winesForWinery(catalog, wineryId);
+  const sections = groupWinesByColorSections(wines);
+  const expandable = wineryHasExpandableDetail(winery.note, winery.web);
 
   return (
     <PageMain>
-      <h1 className="visitor-page-heading" style={{ marginTop: 0 }}>
-        {winery.name}
-      </h1>
-      <p style={{ margin: "0 0 1rem", color: "#555", fontSize: "0.92rem" }}>
-        {t("winery.cellarWord")} {winery.locationNumber}
-      </p>
-      <h2 style={{ fontSize: "1rem", margin: "0 0 0.5rem" }}>
-        {t("winery.winesHeading")}
-      </h2>
+      <div className="visitor-winery-page-head">
+        <div className="visitor-winery-page-head-main">
+          <span
+            className="visitor-loc-badge"
+            aria-label={`${t("winery.cellarWord")} ${winery.locationNumber.trim() || "—"}`}
+          >
+            {winery.locationNumber.trim() || "—"}
+          </span>
+          <h1 className="visitor-winery-page-title">{winery.name}</h1>
+        </div>
+        {expandable ? (
+          <button
+            type="button"
+            className={`visitor-winery-head-chevron${detailOpen ? " visitor-winery-head-chevron-open" : ""}`}
+            aria-expanded={detailOpen}
+            aria-label={t("winery.detailToggleAria")}
+            onClick={() => setDetailOpen((o) => !o)}
+          >
+            ▼
+          </button>
+        ) : null}
+      </div>
+      {detailOpen && expandable ? (
+        <div className="visitor-winery-detail visitor-winery-detail-below-head">
+          {winery.note?.trim() ? (
+            <p className="visitor-winery-note">{winery.note.trim()}</p>
+          ) : null}
+          {winery.web?.trim() ? (
+            <p className="visitor-winery-web-wrap">
+              <a
+                href={wineryWebHref(winery.web)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="visitor-winery-web"
+              >
+                {winery.web.trim()}
+              </a>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {wines.length === 0 ? (
         <p>{t("winery.noWinesHere")}</p>
       ) : (
-        <ul style={{ listStyle: "none", paddingLeft: 0, margin: 0 }}>
-          {wines.map((wine) => (
-            <li key={wine.id} className="visitor-wine-card">
-              <div className="visitor-wine-label">{wine.label}</div>
-              <div className="visitor-wine-line2">{wineSecondaryLine(wine)}</div>
-              {wine.description ? (
-                <p style={{ margin: "0.35rem 0 0", color: "#333", fontSize: "0.9rem" }}>
-                  {wine.description}
-                </p>
-              ) : null}
-              <WineActionToggles wineId={wine.id} />
-            </li>
+        <div className="visitor-wine-sections">
+          {sections.map(({ color, wines: groupWines }) => (
+            <section
+              key={color}
+              className="visitor-wine-color-section"
+              aria-labelledby={`wine-color-${color}`}
+            >
+              <h3
+                id={`wine-color-${color}`}
+                className="visitor-wine-color-heading"
+              >
+                {colorSectionTitle(color)}
+              </h3>
+              <ul className="visitor-wine-list-block">
+                {groupWines.map((wine: Wine) => (
+                  <li key={wine.id} className="visitor-wine-card">
+                    <WineActionToggles wineId={wine.id}>
+                      <span className="visitor-wine-label">{wine.label}</span>
+                    </WineActionToggles>
+                    <div className="visitor-wine-line2">
+                      {wineSecondaryLine(wine)}
+                    </div>
+                    {wine.description ? (
+                      <p
+                        style={{
+                          margin: "0.35rem 0 0",
+                          color: "#333",
+                          fontSize: "0.9rem",
+                        }}
+                      >
+                        {wine.description}
+                      </p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
     </PageMain>
   );

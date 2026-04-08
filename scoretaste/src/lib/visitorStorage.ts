@@ -8,12 +8,62 @@ export function visitorStorageKey(eventId: string): string {
   return `scoretaste:visitor:${eventId}`;
 }
 
+const SESSION_STORAGE_KEY = "scoretaste:visitorSession";
+
+export function getOrCreateVisitorSessionKey(): string {
+  if (typeof localStorage === "undefined") {
+    return `tmp-${Math.random().toString(36).slice(2)}`;
+  }
+  let k = localStorage.getItem(SESSION_STORAGE_KEY);
+  if (!k || k.length < 8) {
+    k =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(SESSION_STORAGE_KEY, k);
+  }
+  return k;
+}
+
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePushVisitorSync(eventId: string, blob: VisitorActionsBlob): void {
+  if (typeof window === "undefined") return;
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    void pushVisitorSync(eventId, blob);
+  }, 900);
+}
+
+async function pushVisitorSync(
+  eventId: string,
+  blob: VisitorActionsBlob,
+): Promise<void> {
+  const sessionKey = getOrCreateVisitorSessionKey();
+  const wines: Record<string, { liked: boolean; wantToBuy: boolean }> = {};
+  for (const [wineId, rec] of Object.entries(blob.actions)) {
+    if (rec.liked || rec.wantToBuy) {
+      wines[wineId] = { liked: rec.liked, wantToBuy: rec.wantToBuy };
+    }
+  }
+  try {
+    await fetch(`/guide/data/events/${encodeURIComponent(eventId)}/visitor-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey, wines }),
+    });
+  } catch {
+    /* offline nebo jiný host */
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function emptyBlob(eventId: string): VisitorActionsBlob {
-  return { schemaVersion: 1, eventId, actions: {} };
+  return { schemaVersion: 1, eventId, actions: {}, visitedWineries: {} };
 }
 
 export function loadVisitorActions(eventId: string): VisitorActionsBlob {
@@ -27,12 +77,23 @@ export function loadVisitorActions(eventId: string): VisitorActionsBlob {
     if (parsed.schemaVersion !== 1 || parsed.eventId !== eventId) {
       return emptyBlob(eventId);
     }
+    const visitedRaw = (parsed as VisitorActionsBlob).visitedWineries;
+    const visitedWineries: Record<string, boolean> =
+      visitedRaw && typeof visitedRaw === "object"
+        ? Object.fromEntries(
+            Object.entries(visitedRaw).filter(
+              ([, v]) => typeof v === "boolean",
+            ),
+          )
+        : {};
     return {
       schemaVersion: 1,
       eventId,
-      actions: parsed.actions && typeof parsed.actions === "object"
-        ? parsed.actions
-        : {},
+      actions:
+        parsed.actions && typeof parsed.actions === "object"
+          ? parsed.actions
+          : {},
+      visitedWineries,
     };
   } catch {
     return emptyBlob(eventId);
@@ -45,6 +106,7 @@ export function saveVisitorActions(blob: VisitorActionsBlob): void {
     visitorStorageKey(blob.eventId),
     JSON.stringify(blob),
   );
+  schedulePushVisitorSync(blob.eventId, blob);
 }
 
 function getOrCreate(
@@ -92,6 +154,27 @@ export function toggleWineWantToBuy(
   return blob;
 }
 
+/** Toggle navštívený sklep; vrací nový blob. */
+export function toggleWineryVisited(
+  eventId: string,
+  wineryId: string,
+): VisitorActionsBlob {
+  const blob = loadVisitorActions(eventId);
+  const prev = blob.visitedWineries ?? {};
+  const next = { ...prev };
+  if (next[wineryId]) {
+    delete next[wineryId];
+  } else {
+    next[wineryId] = true;
+  }
+  const out: VisitorActionsBlob = {
+    ...blob,
+    visitedWineries: next,
+  };
+  saveVisitorActions(out);
+  return out;
+}
+
 /** Vína, která patří do katalogu (existuje vinařství pro wineryId). */
 export function wineIdsWithValidWinery(catalog: EventCatalog): Set<string> {
   const wineryIds = new Set(catalog.wineries.map((w) => w.id));
@@ -111,26 +194,48 @@ export function pruneVisitorActionsBlob(
   blob: VisitorActionsBlob,
 ): VisitorActionsBlob {
   const validWineIds = wineIdsWithValidWinery(catalog);
-  let removed = false;
+  const validWineryIds = new Set(catalog.wineries.map((w) => w.id));
+
+  let actionsNeedPrune = false;
   for (const id of Object.keys(blob.actions)) {
     if (!validWineIds.has(id)) {
-      removed = true;
+      actionsNeedPrune = true;
       break;
     }
   }
-  if (!removed) {
-    return blob;
-  }
-  const nextActions: Record<string, VisitorWineActionRecord> = {};
-  for (const [id, rec] of Object.entries(blob.actions)) {
-    if (validWineIds.has(id)) {
-      nextActions[id] = rec;
+
+  const vw = blob.visitedWineries;
+  const nextVisited: Record<string, boolean> = {};
+  if (vw && typeof vw === "object") {
+    for (const [wid, v] of Object.entries(vw)) {
+      if (validWineryIds.has(wid) && v) {
+        nextVisited[wid] = true;
+      }
     }
   }
+  const visitedNeedPrune =
+    vw &&
+    typeof vw === "object" &&
+    Object.keys(vw).some((wid) => !validWineryIds.has(wid));
+
+  if (!actionsNeedPrune && !visitedNeedPrune) {
+    return blob;
+  }
+
+  const nextActions: Record<string, VisitorWineActionRecord> = {};
+  if (actionsNeedPrune) {
+    for (const [id, rec] of Object.entries(blob.actions)) {
+      if (validWineIds.has(id)) {
+        nextActions[id] = rec;
+      }
+    }
+  }
+
   const out: VisitorActionsBlob = {
     schemaVersion: 1,
     eventId: blob.eventId,
-    actions: nextActions,
+    actions: actionsNeedPrune ? nextActions : blob.actions,
+    visitedWineries: visitedNeedPrune ? nextVisited : blob.visitedWineries,
   };
   saveVisitorActions(out);
   return out;

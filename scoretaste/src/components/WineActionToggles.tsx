@@ -1,32 +1,45 @@
+import type { ReactNode } from "react";
 import { useVisitorActions } from "../context/VisitorActionsContext";
 import { t } from "../i18n";
 
-type Props = { wineId: string };
+type Props = { wineId: string; children: ReactNode };
 
-export function WineActionToggles({ wineId }: Props) {
+export function WineActionToggles({ wineId, children }: Props) {
   const { getRecord, toggleLiked, toggleWantToBuy } = useVisitorActions();
   const r = getRecord(wineId);
 
+  const onBasketClick = () => {
+    if (r.wantToBuy) {
+      if (window.confirm(t("wine.confirmRemoveFromBasket"))) {
+        toggleWantToBuy(wineId);
+      }
+      return;
+    }
+    toggleWantToBuy(wineId);
+  };
+
   return (
-    <div
-      className="visitor-wine-actions"
-      style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}
-    >
+    <div className="visitor-wine-actions-row">
       <button
         type="button"
-        onClick={() => toggleWantToBuy(wineId)}
-        aria-pressed={r.wantToBuy}
-        style={{ padding: "0.35rem 0.6rem", cursor: "pointer" }}
-      >
-        {r.wantToBuy ? t("wine.wantToBuyActive") : t("wine.wantToBuy")}
-      </button>
-      <button
-        type="button"
+        className="visitor-wine-star"
         onClick={() => toggleLiked(wineId)}
         aria-pressed={r.liked}
-        style={{ padding: "0.35rem 0.6rem", cursor: "pointer" }}
+        aria-label={r.liked ? t("wine.savedAria") : t("wine.saveAria")}
       >
-        {r.liked ? t("wine.liked") : t("wine.like")}
+        {r.liked ? "★" : "☆"}
+      </button>
+      <div className="visitor-wine-title-wrap">{children}</div>
+      <button
+        type="button"
+        className="visitor-wine-basket"
+        onClick={onBasketClick}
+        aria-pressed={r.wantToBuy}
+        aria-label={
+          r.wantToBuy ? t("wine.wantToBuyActiveAria") : t("wine.wantToBuyAria")
+        }
+      >
+        🛒
       </button>
     </div>
   );

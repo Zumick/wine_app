@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useMatch } from "react-router-dom";
 import type { EventCatalog } from "../types";
 import { t } from "../i18n";
@@ -9,6 +9,36 @@ type Props = {
   catalog: EventCatalog;
   outletContext: VisitorSessionOutletContext;
 };
+
+function visitorLogoUrls(eventId: string) {
+  const base = import.meta.env.BASE_URL;
+  const primary = `${base}assets/logo_${eventId}.png`;
+  const fallback = `${base}assets/logo_def.png`;
+  return { primary, fallback };
+}
+
+function VisitorEventLogo({ eventId }: { eventId: string }) {
+  const { primary, fallback } = visitorLogoUrls(eventId);
+  const [src, setSrc] = useState(primary);
+
+  useEffect(() => {
+    setSrc(primary);
+  }, [primary]);
+
+  return (
+    <img
+      className="visitor-logo-img"
+      src={src}
+      alt=""
+      width={112}
+      height={40}
+      decoding="async"
+      onError={() => {
+        setSrc((current) => (current === fallback ? current : fallback));
+      }}
+    />
+  );
+}
 
 export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
@@ -24,11 +54,10 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
   return (
     <div className="visitor-shell">
       <header className="visitor-header">
+        <div className="visitor-content-width">
         <div className="visitor-header-row1">
           <div className="visitor-brand">
-            <span className="visitor-logo" aria-hidden="true">
-              ST
-            </span>
+            <VisitorEventLogo eventId={eventId} />
             <span className="visitor-event-title">{eventName}</span>
           </div>
           <button
@@ -86,6 +115,7 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
             </button>
           </div>
         ) : null}
+        </div>
       </header>
 
       {infoOpen ? (

@@ -1,4 +1,5 @@
 import type { EventCatalog, Wine, Winery } from "../types";
+import { normalizeWineColor } from "./wineSort";
 
 function parseWinery(raw: unknown): Winery {
   if (!raw || typeof raw !== "object") {
@@ -10,7 +11,7 @@ function parseWinery(raw: unknown): Winery {
     typeof o.eventId === "string" ? o.eventId : String(o.eventId ?? "");
   const name = String(o.name ?? "").trim();
   const locationNumber = String(o.locationNumber ?? "").trim();
-  if (!id || !eventId || !name || !locationNumber) {
+  if (!id || !eventId || !name) {
     throw new Error("INVALID_EVENT");
   }
   return { id, eventId, name, locationNumber };
@@ -38,6 +39,9 @@ function parseWine(raw: unknown): Wine {
     variety,
     predicate,
     vintage,
+    color: normalizeWineColor(
+      typeof o.color === "string" ? o.color : undefined,
+    ),
   };
   const desc = o.description;
   if (typeof desc === "string" && desc.trim()) {
@@ -81,10 +85,12 @@ export async function fetchEventCatalog(eventId: string): Promise<EventCatalog> 
   const seenLoc = new Set<string>();
   for (const w of wineries) {
     const ln = w.locationNumber.trim();
-    if (seenLoc.has(ln)) {
-      throw new Error("INVALID_EVENT");
+    if (ln) {
+      if (seenLoc.has(ln)) {
+        throw new Error("INVALID_EVENT");
+      }
+      seenLoc.add(ln);
     }
-    seenLoc.add(ln);
   }
   try {
     wines = rawWines.map(parseWine);

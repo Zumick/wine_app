@@ -1,18 +1,20 @@
 import { Link, useParams } from "react-router-dom";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
+import { useVisitorActions } from "../context/VisitorActionsContext";
 import { useSessionEventCatalog, useWineryListFilter } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import type { EventCatalog, Winery } from "../types";
 
 function sortedWineries(catalog: EventCatalog): Winery[] {
-  return [...catalog.wineries].sort((a, b) =>
-    a.locationNumber.localeCompare(b.locationNumber, "cs", { numeric: true }),
-  );
-}
-
-function wineCount(catalog: EventCatalog, wineryId: string): number {
-  return catalog.wines.filter((w) => w.wineryId === wineryId).length;
+  return [...catalog.wineries].sort((a, b) => {
+    const ae = a.locationNumber.trim() ? 0 : 1;
+    const be = b.locationNumber.trim() ? 0 : 1;
+    if (ae !== be) return ae - be;
+    return a.locationNumber.localeCompare(b.locationNumber, "cs", {
+      numeric: true,
+    });
+  });
 }
 
 function matchesFilter(w: Winery, q: string): boolean {
@@ -28,6 +30,7 @@ export function WineryListPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const state = useSessionEventCatalog();
   const [wineryFilter] = useWineryListFilter();
+  const { isWineryVisited, toggleWineryVisited } = useVisitorActions();
 
   if (!eventId) {
     return <ErrorBlock title={catalogErrorTitle("MISSING_EVENT_ID")} />;
@@ -62,20 +65,34 @@ export function WineryListPage() {
       ) : (
         <ul className="visitor-winery-list">
           {rows.map((w) => {
-            const n = wineCount(catalog, w.id);
+            const visited = isWineryVisited(w.id);
             return (
-              <li key={w.id}>
-                <Link to={w.id} className="visitor-winery-card">
-                  <div className="visitor-winery-card-name">{w.name}</div>
-                  <div className="visitor-winery-card-meta">
-                    <span>
-                      {t("winery.cellarWord")} {w.locationNumber}
+              <li key={w.id} className="visitor-winery-li">
+                <div className="visitor-winery-row">
+                  <Link to={w.id} className="visitor-winery-main">
+                    <span className="visitor-loc-badge">
+                      {w.locationNumber.trim() || "—"}
                     </span>
-                    <span>
-                      {n} {t("visitor.wineCountLabel")}
-                    </span>
-                  </div>
-                </Link>
+                    <span className="visitor-winery-name">{w.name}</span>
+                  </Link>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={visited}
+                    className={`visitor-winery-visited-toggle${visited ? " visitor-winery-visited-toggle-on" : ""}`}
+                    aria-label={
+                      visited
+                        ? t("winery.visitedToggleAriaOff")
+                        : t("winery.visitedToggleAriaOn")
+                    }
+                    onClick={(e) => {
+                      e.preventDefault();
+                      toggleWineryVisited(w.id);
+                    }}
+                  >
+                    {visited ? "✓" : ""}
+                  </button>
+                </div>
               </li>
             );
           })}

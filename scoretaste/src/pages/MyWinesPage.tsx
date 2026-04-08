@@ -8,16 +8,22 @@ import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import { wineIdsWithValidWinery } from "../lib/visitorStorage";
 import { wineSecondaryLine } from "../lib/wineDisplay";
+import { compareWinesByColorThenLabel } from "../lib/wineSort";
 import type { EventCatalog, Wine, Winery } from "../types";
 
 function sortedWineries(catalog: EventCatalog): Winery[] {
-  return [...catalog.wineries].sort((a, b) =>
-    a.locationNumber.localeCompare(b.locationNumber, "cs", { numeric: true }),
-  );
+  return [...catalog.wineries].sort((a, b) => {
+    const ae = a.locationNumber.trim() ? 0 : 1;
+    const be = b.locationNumber.trim() ? 0 : 1;
+    if (ae !== be) return ae - be;
+    return a.locationNumber.localeCompare(b.locationNumber, "cs", {
+      numeric: true,
+    });
+  });
 }
 
 function sortedWines(wines: Wine[]): Wine[] {
-  return [...wines].sort((a, b) => a.label.localeCompare(b.label, "cs"));
+  return [...wines].sort(compareWinesByColorThenLabel);
 }
 
 type Segment = "saved" | "buy";
@@ -25,9 +31,10 @@ type Segment = "saved" | "buy";
 function WineShortlistRow({ wine }: { wine: Wine }) {
   return (
     <li className="visitor-wine-card" style={{ listStyle: "none" }}>
-      <div className="visitor-wine-label">{wine.label}</div>
+      <WineActionToggles wineId={wine.id}>
+        <span className="visitor-wine-label">{wine.label}</span>
+      </WineActionToggles>
       <div className="visitor-wine-line2">{wineSecondaryLine(wine)}</div>
-      <WineActionToggles wineId={wine.id} />
     </li>
   );
 }
@@ -172,27 +179,14 @@ export function MyWinesPage() {
               marginBottom: "1.75rem",
             }}
           >
-            <h2
-              style={{
-                fontSize: "1.15rem",
-                margin: "0 0 0.65rem",
-                paddingBottom: "0.4rem",
-                borderBottom: "1px solid #ddd",
-                fontWeight: 700,
-              }}
-            >
-              <span style={{ display: "block" }}>{winery.name}</span>
+            <h2 className="visitor-mywines-winery-heading">
               <span
-                style={{
-                  display: "block",
-                  fontSize: "0.88rem",
-                  fontWeight: 500,
-                  color: "#555",
-                  marginTop: "0.2rem",
-                }}
+                className="visitor-loc-badge"
+                aria-label={`${t("winery.cellarWord")} ${winery.locationNumber.trim() || "—"}`}
               >
-                {t("winery.cellarWord")} {winery.locationNumber}
+                {winery.locationNumber.trim() || "—"}
               </span>
+              <span className="visitor-mywines-winery-name">{winery.name}</span>
             </h2>
             <ul style={{ listStyle: "none", paddingLeft: 0, margin: 0 }}>
               {wines.map((wine) => (
