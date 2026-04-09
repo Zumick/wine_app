@@ -22,6 +22,7 @@ import json
 import secrets
 import time
 import hmac
+from datetime import datetime
 
 
 def _public_url_scheme_early():
@@ -361,6 +362,14 @@ def _scoretaste_catalog_from_db(conn, event_id):
         "name": (deg["nazev"] or "").strip(),
         "date": (deg["datum"] or "").strip(),
     }
+    active_ep = get_active_collection_epoch(conn, eid)
+    event["eventId"] = sid
+    if active_ep:
+        event["activeEpochId"] = int(active_ep["id"])
+        event["liveStartedAt"] = str(active_ep["started_at"] or "").strip() or None
+    else:
+        event["activeEpochId"] = None
+        event["liveStartedAt"] = None
     wineries_rows = conn.execute(
         """
         SELECT id, name, location_number, token, note, web
@@ -758,28 +767,347 @@ def _migrate_scoretaste_wineries_location_nullable(conn):
     conn.execute("INSERT INTO scoretaste_wines SELECT * FROM _st_mig_w")
 
     if has_vwf:
+        _ensure_scoretaste_event_collection_epoch_table(conn)
         conn.execute(
             """
             CREATE TABLE scoretaste_visitor_wine_flag (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id INTEGER NOT NULL,
                 wine_id INTEGER NOT NULL,
                 session_key TEXT NOT NULL,
+                -- epoch_id NULL = pre-epoch historical data
+                -- NEVER used for active statistics or writes
+                epoch_id INTEGER,
                 liked INTEGER NOT NULL DEFAULT 0,
                 want_to_buy INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT,
-                PRIMARY KEY (event_id, wine_id, session_key),
                 FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
-                FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+                FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+                FOREIGN KEY (epoch_id) REFERENCES scoretaste_event_collection_epoch(id) ON DELETE CASCADE
             )
             """
         )
-        conn.execute("INSERT INTO scoretaste_visitor_wine_flag SELECT * FROM _st_mig_vwf")
+        conn.execute(
+            """
+            INSERT INTO scoretaste_visitor_wine_flag
+            (event_id, wine_id, session_key, epoch_id, liked, want_to_buy, updated_at)
+            SELECT event_id, wine_id, session_key, NULL, liked, want_to_buy, updated_at
+            FROM _st_mig_vwf
+            """
+        )
+        _ensure_scoretaste_visitor_wine_flag_epoch_indexes(conn)
 
     conn.execute("DROP TABLE IF EXISTS _st_mig_w")
     conn.execute("DROP TABLE IF EXISTS _st_mig_y")
     conn.execute("DROP TABLE IF EXISTS _st_mig_vwf")
 
     conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _scoretaste_vwf_column_names(conn):
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(scoretaste_visitor_wine_flag)").fetchall()}
+    except Exception:
+        return set()
+
+
+def _ensure_scoretaste_event_collection_epoch_table(conn):
+    """Tabulka epoch sběru dat pro průvodce; idempotentní."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scoretaste_event_collection_epoch (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            epoch_number INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            started_by_admin_user_id INTEGER,
+            ended_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+            UNIQUE (event_id, epoch_number)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS scoretaste_event_epoch_one_active
+        ON scoretaste_event_collection_epoch(event_id)
+        WHERE is_active = 1
+        """
+    )
+
+
+def _ensure_scoretaste_visitor_wine_flag_epoch_indexes(conn):
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS scoretaste_vwf_uq_legacy
+        ON scoretaste_visitor_wine_flag(event_id, wine_id, session_key)
+        WHERE epoch_id IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS scoretaste_vwf_uq_epoch
+        ON scoretaste_visitor_wine_flag(epoch_id, wine_id, session_key)
+        WHERE epoch_id IS NOT NULL
+        """
+    )
+
+
+def _ensure_scoretaste_visitor_selection_event_log_table(conn):
+    """Append-only log změn výběru vín (KPI / pilot analýzy)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scoretaste_visitor_selection_event_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            epoch_id INTEGER,
+            device_id TEXT NOT NULL,
+            wine_id INTEGER NOT NULL,
+            previous_state TEXT,
+            new_state TEXT,
+            action_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+            FOREIGN KEY (epoch_id) REFERENCES scoretaste_event_collection_epoch(id) ON DELETE SET NULL,
+            FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS scoretaste_sel_log_event_epoch
+        ON scoretaste_visitor_selection_event_log(event_id, epoch_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS scoretaste_sel_log_created
+        ON scoretaste_visitor_selection_event_log(created_at)
+        """
+    )
+
+
+def _migrate_scoretaste_visitor_wine_flag_for_epochs(conn):
+    """Přidá surrogate id a epoch_id k označením vín; idempotentní.
+
+    epoch_id NULL = pre-epoch historical data — NEVER used for active statistics or writes.
+    """
+    _ensure_scoretaste_event_collection_epoch_table(conn)
+    cols = _scoretaste_vwf_column_names(conn)
+    if not cols:
+        return
+    if "id" in cols and "epoch_id" in cols:
+        _ensure_scoretaste_visitor_wine_flag_epoch_indexes(conn)
+        return
+    if "id" in cols and "epoch_id" not in cols:
+        # epoch_id NULL = pre-epoch historical data; NEVER used for active statistics or writes
+        conn.execute(
+            "ALTER TABLE scoretaste_visitor_wine_flag ADD COLUMN epoch_id INTEGER"
+        )
+        _ensure_scoretaste_visitor_wine_flag_epoch_indexes(conn)
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE _st_vwf_mig_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                wine_id INTEGER NOT NULL,
+                session_key TEXT NOT NULL,
+                -- epoch_id NULL = pre-epoch historical data
+                -- NEVER used for active statistics or writes
+                epoch_id INTEGER,
+                liked INTEGER NOT NULL DEFAULT 0,
+                want_to_buy INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
+                FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+                FOREIGN KEY (epoch_id) REFERENCES scoretaste_event_collection_epoch(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO _st_vwf_mig_new
+            (event_id, wine_id, session_key, epoch_id, liked, want_to_buy, updated_at)
+            SELECT event_id, wine_id, session_key, NULL, liked, want_to_buy, updated_at
+            FROM scoretaste_visitor_wine_flag
+            """
+        )
+        conn.execute("DROP TABLE scoretaste_visitor_wine_flag")
+        conn.execute("ALTER TABLE _st_vwf_mig_new RENAME TO scoretaste_visitor_wine_flag")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+    _ensure_scoretaste_visitor_wine_flag_epoch_indexes(conn)
+
+
+def get_active_collection_epoch(conn, event_id):
+    """Vrátí aktivní epochu sběru pro akci, nebo None (bez auto-vytváření)."""
+    eid = int(event_id)
+    return conn.execute(
+        """
+        SELECT * FROM scoretaste_event_collection_epoch
+        WHERE event_id = ? AND is_active = 1
+        LIMIT 1
+        """,
+        (eid,),
+    ).fetchone()
+
+
+def _parse_visitor_sync_epoch_id(data):
+    """Vrací int epoch_id z JSON, nebo None pokud chybí / null. Vyhodí ValueError při neplatné hodnotě."""
+    if not isinstance(data, dict):
+        return None
+    v = data.get("epochId")
+    if v is None:
+        v = data.get("epoch_id")
+    if v is None or v is False:
+        return None
+    if v is True:
+        raise ValueError("epoch_id")
+    if isinstance(v, bool):
+        raise ValueError("epoch_id")
+    if isinstance(v, int):
+        return int(v)
+    if isinstance(v, float):
+        if not v.is_integer():
+            raise ValueError("epoch_id")
+        return int(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    if not s.lstrip("-").isdigit():
+        raise ValueError("epoch_id")
+    return int(s)
+
+
+def _validate_visitor_sync_epoch(conn, event_id, data):
+    """Ověří epoch_id vůči aktivní epoše. Vrací (ok, http_status|None, code|None)."""
+    eid = int(event_id)
+    active = get_active_collection_epoch(conn, eid)
+    try:
+        client_eid = _parse_visitor_sync_epoch_id(data)
+    except ValueError:
+        return False, 400, "invalid_epoch_id"
+    if active:
+        if client_eid is None:
+            return False, 400, "epoch_id_required"
+        if int(client_eid) != int(active["id"]):
+            return False, 409, "epoch_mismatch"
+    else:
+        if client_eid is not None:
+            return False, 409, "epoch_mismatch"
+    return True, None, None
+
+
+def _wine_selection_state_label(liked: bool, want_to_buy: bool):
+    if liked and want_to_buy:
+        return "top"
+    if liked:
+        return "favorite"
+    return None
+
+
+def _selection_action_type_from_transition(previous_label, new_label):
+    """Vrátí set_favorite | set_top | remove nebo None při beze změny."""
+
+    def norm(v):
+        return v if v in ("favorite", "top") else None
+
+    p = norm(previous_label)
+    n = norm(new_label)
+    if p == n:
+        return None
+    if n is None:
+        return "remove"
+    if n == "top" and p != "top":
+        return "set_top"
+    if n == "favorite":
+        return "set_favorite"
+    return None
+
+
+def _append_visitor_selection_event_logs(
+    conn,
+    event_id,
+    epoch_id_val,
+    device_id,
+    old_map,
+    new_map,
+    now_iso,
+):
+    """Zapíše append-only řádky pro každou změnu stavu výběru vína."""
+    eid = int(event_id)
+    all_wids = set(old_map.keys()) | set(new_map.keys())
+    for wid in all_wids:
+        ol = old_map.get(wid, (False, False))
+        nw = new_map.get(wid, (False, False))
+        prev_s = _wine_selection_state_label(ol[0], ol[1])
+        new_s = _wine_selection_state_label(nw[0], nw[1])
+        act = _selection_action_type_from_transition(prev_s, new_s)
+        if not act:
+            continue
+        conn.execute(
+            """
+            INSERT INTO scoretaste_visitor_selection_event_log
+            (event_id, epoch_id, device_id, wine_id, previous_state, new_state, action_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                eid,
+                epoch_id_val,
+                device_id,
+                int(wid),
+                prev_s,
+                new_s,
+                act,
+                now_iso,
+            ),
+        )
+
+
+def start_new_live_collection_epoch(conn, event_id, started_by_admin_user_id=None):
+    """Ukončí případnou aktivní epochu a vytvoří novou. Historická data v DB nemaze."""
+    eid = int(event_id)
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute(
+        """
+        UPDATE scoretaste_event_collection_epoch
+        SET is_active = 0, ended_at = ?
+        WHERE event_id = ? AND is_active = 1
+        """,
+        (now_iso, eid),
+    )
+    row_max = conn.execute(
+        """
+        SELECT COALESCE(MAX(epoch_number), 0) AS m
+        FROM scoretaste_event_collection_epoch
+        WHERE event_id = ?
+        """,
+        (eid,),
+    ).fetchone()
+    next_num = int(row_max["m"] or 0) + 1
+    cur = conn.execute(
+        """
+        INSERT INTO scoretaste_event_collection_epoch
+        (event_id, epoch_number, started_at, started_by_admin_user_id, ended_at, is_active, created_at)
+        VALUES (?, ?, ?, ?, NULL, 1, ?)
+        """,
+        (eid, next_num, now_iso, started_by_admin_user_id, now_iso),
+    )
+    new_id = cur.lastrowid
+    conn.execute(
+        "UPDATE degustace SET live_collection_started_at = ? WHERE id = ?",
+        (now_iso, eid),
+    )
+    return conn.execute(
+        "SELECT * FROM scoretaste_event_collection_epoch WHERE id = ?",
+        (new_id,),
+    ).fetchone()
 
 
 def init_db():
@@ -848,6 +1176,10 @@ def init_db():
         )
     if "misto" not in exist_deg:
         conn.execute("ALTER TABLE degustace ADD COLUMN misto TEXT")
+    if "live_collection_started_at" not in exist_deg:
+        conn.execute(
+            "ALTER TABLE degustace ADD COLUMN live_collection_started_at TEXT"
+        )
     conn.execute(
         """
         UPDATE degustace SET
@@ -960,21 +1292,30 @@ def init_db():
     if "email" not in st_w_cols:
         conn.execute("ALTER TABLE scoretaste_wineries ADD COLUMN email TEXT")
 
+    _ensure_scoretaste_event_collection_epoch_table(conn)
     _migrate_scoretaste_wineries_location_nullable(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scoretaste_visitor_wine_flag (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id INTEGER NOT NULL,
             wine_id INTEGER NOT NULL,
             session_key TEXT NOT NULL,
+            -- epoch_id NULL = pre-epoch historical data
+            -- NEVER used for active statistics or writes
+            epoch_id INTEGER,
             liked INTEGER NOT NULL DEFAULT 0,
             want_to_buy INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT,
-            PRIMARY KEY (event_id, wine_id, session_key),
             FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
-            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+            FOREIGN KEY (epoch_id) REFERENCES scoretaste_event_collection_epoch(id) ON DELETE CASCADE
         )
     """)
+
+    _migrate_scoretaste_visitor_wine_flag_for_epochs(conn)
+
+    _ensure_scoretaste_visitor_selection_event_log_table(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scoretaste_event_map_hotspots (
@@ -2378,10 +2719,15 @@ def _admin_stats_active_users(conn, event_id):
     eid = int(event_id)
     row = conn.execute(
         """
-        SELECT COUNT(DISTINCT session_key) FROM scoretaste_visitor_wine_flag
-        WHERE event_id = ? AND (liked = 1 OR want_to_buy = 1)
+        SELECT COUNT(DISTINCT f.session_key) FROM scoretaste_visitor_wine_flag f
+        WHERE f.event_id = ?
+        AND (f.liked = 1 OR f.want_to_buy = 1)
+        AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = ? AND e.is_active = 1
+        )
         """,
-        (eid,),
+        (eid, eid),
     ).fetchone()
     return int(row[0] or 0) if row else 0
 
@@ -2397,6 +2743,10 @@ def _admin_stats_wine_rows(conn, event_id):
         JOIN scoretaste_wineries y ON w.winery_id = y.id
         LEFT JOIN scoretaste_visitor_wine_flag f
           ON f.wine_id = w.id AND f.event_id = y.event_id
+          AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = y.event_id AND e.is_active = 1
+          )
         WHERE y.event_id = ?
         GROUP BY w.id
         ORDER BY likes DESC, want_buy DESC, w.label COLLATE NOCASE
@@ -2432,6 +2782,10 @@ def _admin_stats_top_cards(conn, event_id):
         JOIN scoretaste_wineries y ON w.winery_id = y.id
         JOIN scoretaste_visitor_wine_flag f
           ON f.wine_id = w.id AND f.event_id = y.event_id
+          AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = y.event_id AND e.is_active = 1
+          )
         WHERE y.event_id = ? AND (f.liked = 1 OR f.want_to_buy = 1)
         GROUP BY w.id
         ORDER BY points DESC, w.label COLLATE NOCASE, y.name COLLATE NOCASE
@@ -2449,6 +2803,10 @@ def _admin_stats_top_cards(conn, event_id):
         JOIN scoretaste_wines w ON w.winery_id = y.id
         JOIN scoretaste_visitor_wine_flag f
           ON f.wine_id = w.id AND f.event_id = y.event_id
+          AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = y.event_id AND e.is_active = 1
+          )
         WHERE y.event_id = ? AND (f.liked = 1 OR f.want_to_buy = 1)
         GROUP BY y.id
         ORDER BY points DESC, y.name COLLATE NOCASE
@@ -2465,6 +2823,10 @@ def _admin_stats_top_cards(conn, event_id):
         JOIN scoretaste_wineries y ON w.winery_id = y.id
         JOIN scoretaste_visitor_wine_flag f
           ON f.wine_id = w.id AND f.event_id = y.event_id
+          AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = y.event_id AND e.is_active = 1
+          )
         WHERE y.event_id = ? AND (f.liked = 1 OR f.want_to_buy = 1)
         GROUP BY variety_name
         ORDER BY points DESC, variety_name COLLATE NOCASE
@@ -2509,6 +2871,21 @@ def _admin_event_readiness(catalog, wines_by_wid):
     }
 
 
+def _format_live_started_cz(iso_raw):
+    if not iso_raw:
+        return ""
+    s = str(iso_raw).strip()
+    if not s:
+        return ""
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return s
+
+
 def _admin_winery_status_badges_html(wy, wine_count):
     has_loc = bool(str(wy.get("locationNumber") or "").strip())
     parts = []
@@ -2538,14 +2915,19 @@ def _admin_wine_color_options(selected):
 
 
 def _html_guide_admin_page(
-    event_id, deg_row, catalog, selected_winery_id=None, active_tab="catalog"
+    event_id,
+    deg_row,
+    catalog,
+    selected_winery_id=None,
+    active_tab="catalog",
+    active_live_epoch=None,
 ):
     ev = catalog["event"]
     title = escape((ev.get("name") or deg_row["nazev"] or "Akce").strip() or "Akce")
     preview_href = f"{URL_GUIDE_APP_PREFIX}/e/{int(event_id)}/wineries"
     visitor_abs = absolute_public_url(preview_href)
     qr_src = (
-        "https://api.qrserver.com/v1/create-qr-code/?size=120x120&data="
+        "https://api.qrserver.com/v1/create-qr-code/?size=80x80&data="
         + quote(visitor_abs, safe="")
     )
     eid_int = int(event_id)
@@ -2567,6 +2949,15 @@ def _html_guide_admin_page(
         wines_by_wid.setdefault(wid, []).append(w)
 
     readiness = _admin_event_readiness(catalog, wines_by_wid)
+    live_started = None
+    if active_live_epoch is not None:
+        try:
+            s = active_live_epoch["started_at"]
+            live_started = str(s).strip() if s is not None else None
+        except (KeyError, IndexError, TypeError):
+            live_started = None
+        if not live_started:
+            live_started = None
 
     wineries_list = list(catalog.get("wineries") or [])
     wineries_sorted = sorted(
@@ -2609,24 +3000,42 @@ def _html_guide_admin_page(
     <style>
         * {{ box-sizing: border-box; }}
         body {{ font-family: Segoe UI, Arial, sans-serif; margin: 0; color: #1a1a1a; background: #f3f4f6; }}
-        .admin-wrap {{ max-width: 1400px; margin: 0 auto; padding: 16px 20px 32px; }}
+        .admin-wrap {{ max-width: 1400px; margin: 0 auto; padding: 12px 16px 24px; }}
         h1 {{ font-size: 1.35rem; margin: 0 0 12px; }}
         .nav {{ margin-bottom: 12px; font-size: 14px; }}
         .nav a {{ color: #1d4ed8; }}
-        .admin-header-table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; table-layout: fixed; }}
-        .admin-header-logo {{ vertical-align: top; width: 172px; }}
-        .admin-header-logo-link {{ display: inline-flex; align-items: flex-start; justify-content: flex-start; }}
-        .admin-header-logo-img {{ display: block; width: 150px; max-width: 100%; height: auto; }}
-        .admin-header-main {{ vertical-align: top; text-align: center; }}
-        .admin-header-main h1 {{ margin: 0 0 4px; font-size: 1.35rem; }}
-        .admin-header-subtitle {{ margin: 0 0 8px; font-size: 0.95rem; color: #374151; font-weight: 600; }}
-        .admin-header-date {{ margin: 0 0 8px; font-size: 0.95rem; color: #4b5563; }}
-        .admin-header-flash {{ vertical-align: top; text-align: center; }}
-        .admin-header-qr {{ vertical-align: top; text-align: center; width: 180px; padding-left: 12px; }}
-        .admin-header-qr-stack {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
-        .admin-header-qr img {{ display: inline-block; max-width: 120px; height: auto; vertical-align: top; }}
-        .admin-header-host-link {{ display: inline-block; font-size: 13px; color: #1d4ed8; text-decoration: none; text-align: center; }}
+        .admin-header-compact {{ margin-bottom: 10px; }}
+        .admin-header-brand-row {{ display: flex; align-items: flex-start; gap: 12px 16px; flex-wrap: wrap; }}
+        .admin-header-logo-link {{ display: block; flex-shrink: 0; }}
+        .admin-header-logo-img {{ display: block; width: 96px; max-width: 26vw; height: auto; }}
+        .admin-header-text {{ flex: 1; min-width: 140px; text-align: left; }}
+        .admin-header-text h1 {{ margin: 0 0 2px; font-size: 1.15rem; font-weight: 700; line-height: 1.25; color: #111827; }}
+        .admin-header-subtitle {{ margin: 0 0 4px; font-size: 0.8125rem; color: #4b5563; font-weight: 600; }}
+        .admin-header-date {{ margin: 0; font-size: 0.8125rem; color: #6b7280; }}
+        .admin-header-qr-col {{ flex-shrink: 0; margin-left: auto; text-align: center; width: 88px; }}
+        .admin-header-qr-stack {{ display: flex; flex-direction: column; align-items: center; gap: 4px; }}
+        .admin-header-qr-stack img {{ width: 80px; height: 80px; display: block; }}
+        .admin-header-host-link {{ font-size: 11px; color: #1d4ed8; text-decoration: none; line-height: 1.2; }}
         .admin-header-host-link:hover {{ text-decoration: underline; }}
+        .admin-header-flash-row {{ width: 100%; flex-basis: 100%; margin-top: 6px; }}
+        .admin-header-flash-row .admin-flash {{ margin: 4px 0; text-align: left; }}
+        .admin-op-panel {{ margin-bottom: 12px; padding: 10px 12px; }}
+        .admin-op-panel-inner {{ display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px 18px; justify-content: space-between; }}
+        .admin-op-col {{ flex: 1 1 200px; min-width: 0; }}
+        .admin-op-col--mode {{ flex: 0 1 240px; text-align: center; align-self: center; }}
+        .admin-op-col--actions {{ flex: 0 0 auto; text-align: right; align-self: center; min-width: 160px; }}
+        .admin-op-label {{ margin: 0 0 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }}
+        .admin-op-mode-title {{ margin: 0; font-size: 0.9375rem; font-weight: 600; color: #111827; }}
+        .admin-op-mode-ts {{ margin: 5px 0 0; font-size: 0.8125rem; color: #4b5563; }}
+        .admin-op-live-pill {{ display: inline-block; padding: 4px 10px; border-radius: 999px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; font-size: 0.8125rem; font-weight: 600; }}
+        .btn-link-quiet {{ background: none; border: none; color: #6b7280; font-size: 12px; text-decoration: underline; cursor: pointer; padding: 6px 0; font-family: inherit; }}
+        .btn-link-quiet:hover {{ color: #374151; }}
+        dialog.admin-dialog {{ border: 1px solid #d1d5db; border-radius: 10px; padding: 0; max-width: 26rem; }}
+        dialog.admin-dialog::backdrop {{ background: rgba(15, 23, 42, 0.38); }}
+        .admin-dialog-body {{ padding: 16px 18px; }}
+        .admin-dialog-warn {{ margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: #374151; }}
+        .admin-dialog-actions {{ display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }}
+        .admin-readiness-inline--panel {{ margin: 0; }}
         .box {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; background: #fff; }}
         .box-tight h2 {{ margin: 0 0 10px; font-size: 1.05rem; }}
         .add-winery-row {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }}
@@ -2639,8 +3048,8 @@ def _html_guide_admin_page(
         .admin-flash {{ margin: 8px 0; }}
         .admin-flash-error {{ color: #b91c1c; font-weight: 600; }}
         .admin-grid {{ display: flex; gap: 16px; align-items: stretch; min-height: 480px; }}
-        .admin-left {{ flex: 0 0 300px; max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; overflow: auto; max-height: calc(100vh - 220px); }}
-        .admin-right {{ flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; padding: 14px 16px; overflow: auto; max-height: calc(100vh - 220px); }}
+        .admin-left {{ flex: 0 0 300px; max-width: 100%; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; overflow: auto; max-height: calc(100vh - 300px); }}
+        .admin-right {{ flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; padding: 14px 16px; overflow: auto; max-height: calc(100vh - 300px); }}
         .admin-winery-item {{ border-bottom: 1px solid #e5e7eb; }}
         .admin-winery-item-link {{
             display: block; padding: 10px 12px; text-decoration: none; color: inherit; cursor: pointer;
@@ -2719,35 +3128,27 @@ def _html_guide_admin_page(
 </head>
 <body>
     <div class="admin-wrap">
-    <table class="admin-header-table" role="presentation">
-    <tr>
-      <td class="admin-header-logo" rowspan="3">
+    <header class="admin-header-compact">
+      <div class="admin-header-brand-row">
         <a href="/" class="admin-header-logo-link" aria-label="Domů">
-          <img src="{escape(logo_url)}" alt="Logo organizátora" class="admin-header-logo-img" loading="lazy">
+          <img src="{escape(logo_url)}" alt="" class="admin-header-logo-img" loading="lazy" width="96" height="96">
         </a>
-      </td>
-      <td class="admin-header-main">
-      </td>
-      <td class="admin-header-qr" rowspan="3">
-        <div class="admin-header-qr-stack">
-        <img src="{escape(qr_src)}" alt="QR pro aplikaci návštěvníků" width="120" height="120" loading="lazy">
-        <a class="admin-header-host-link" href="{prev_h}">Průvodce degustací</a>
-        </div>
-      </td>
-    </tr>
-    <tr>
-      <td class="admin-header-main">
-        <h1>{title}</h1>
-        <p class="admin-header-subtitle">Správa průvodce degustací</p>
+        <div class="admin-header-text">
+          <h1>{title}</h1>
+          <p class="admin-header-subtitle">Správa průvodce degustací</p>
 {event_date_html}
-      </td>
-    </tr>
-    <tr>
-      <td class="admin-header-main admin-header-flash">
+        </div>
+        <div class="admin-header-qr-col">
+          <div class="admin-header-qr-stack">
+            <img src="{escape(qr_src)}" alt="" width="80" height="80" loading="lazy">
+            <a class="admin-header-host-link" href="{prev_h}">Průvodce degustací</a>
+          </div>
+        </div>
+      </div>
+      <div class="admin-header-flash-row" aria-live="polite">
 {flash_html}
-      </td>
-    </tr>
-    </table>
+      </div>
+    </header>
 """
     cat_href = escape(_admin_tab_url(admin_base, "catalog", sel or None))
     stats_href = escape(_admin_tab_url(admin_base, "stats"))
@@ -2765,10 +3166,86 @@ def _html_guide_admin_page(
     </nav>
 """
     rt = escape(active_tab)
-    head_prefix = (
-        head
-        + tabs_html
+    ts_disp = escape(_format_live_started_cz(live_started)) if live_started else ""
+    epoch_meta_html = ""
+    if active_live_epoch is not None and live_started:
+        try:
+            epi = int(active_live_epoch["id"])
+            epn = int(active_live_epoch["epoch_number"])
+            epoch_meta_html = (
+                f'<p class="admin-op-mode-ts" style="margin-top:4px;font-size:12px;color:#6b7280;">'
+                f"Běh č. {epn} · epocha id {epi}</p>"
+            )
+        except (KeyError, IndexError, TypeError, ValueError):
+            epoch_meta_html = ""
+    if live_started:
+        mode_block = f"""          <p class="admin-op-live-pill" role="status">Ostrý sběr aktivní</p>
+          <p class="admin-op-mode-ts">Zahájeno: {ts_disp}</p>{epoch_meta_html}"""
+        actions_block = """          <button type="button" class="btn-link-quiet" id="admin-open-dlg-live-reset">Resetovat a zahájit znovu</button>"""
+    else:
+        mode_block = """          <p class="admin-op-mode-title">Příprava</p>"""
+        actions_block = """          <button type="button" class="btn btn-primary" id="admin-open-dlg-live-start">Zahájit ostrý sběr dat</button>"""
+
+    op_panel_html = f"""    <div class="admin-op-panel box" role="region" aria-label="Připravenost a režim sběru dat">
+      <div class="admin-op-panel-inner">
+        <div class="admin-op-col">
+          <p class="admin-op-label">Připravenost akce</p>
+          <div class="admin-readiness-inline admin-readiness-inline--panel">
+            <span class="admin-readiness-chip">Vinařství celkem: <strong>{readiness["n_total"]}</strong></span>
+            <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_wines"] > 0 else ''}">Bez zadaných vzorků: <strong>{readiness["n_without_wines"]}</strong></span>
+            <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_loc"] > 0 else ''}">Bez čísla sklepu: <strong>{readiness["n_without_loc"]}</strong></span>
+            <span class="admin-readiness-chip {'admin-readiness-chip-ok' if readiness["is_ready"] else 'admin-readiness-chip-bad'}">Celkový status: <strong>{'Připraveno k publikaci' if readiness["is_ready"] else 'Nepřipraveno k publikaci'}</strong></span>
+          </div>
+        </div>
+        <div class="admin-op-col admin-op-col--mode">
+          <p class="admin-op-label">Režim akce</p>
+{mode_block}
+        </div>
+        <div class="admin-op-col admin-op-col--actions">
+          <p class="admin-op-label">Sběr dat</p>
+          <div>{actions_block}</div>
+        </div>
+      </div>
+    </div>
+"""
+    warn_live = (
+        "Opravdu zahájit ostrý sběr dat? Spustí se nový běh sběru (nová aktivní epocha). "
+        "Dosavadní historie v databázi zůstane zachována, ale nové návštěvnické označení se bude "
+        "vážit k tomuto běhu. Pokud už ostrý sběr probíhá, aktuální běh bude ukončen a nahrazen novým."
     )
+    warn_reset = (
+        "Opravdu resetovat a zahájit znovu? Aktuální běh ostrého sběru bude ukončen a začne nový běh "
+        "(nová aktivní epocha). Historická data v databázi se nemazou. "
+        "Nové označení od návštěvníků se budou vážit k novému běhu."
+    )
+    dialogs_html = f"""    <dialog id="admin-dlg-live-start" class="admin-dialog" aria-labelledby="admin-dlg-live-start-title">
+      <div class="admin-dialog-body">
+        <p id="admin-dlg-live-start-title" class="admin-dialog-warn">{escape(warn_live)}</p>
+        <form method="post">
+          <input type="hidden" name="action" value="live_start_confirm">
+          <input type="hidden" name="redirect_tab" value="{rt}">
+          <div class="admin-dialog-actions">
+            <button type="button" class="btn" onclick="document.getElementById('admin-dlg-live-start').close()">Zrušit</button>
+            <button type="submit" class="btn btn-danger">Zahájit ostrý sběr dat</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+    <dialog id="admin-dlg-live-reset" class="admin-dialog" aria-labelledby="admin-dlg-live-reset-title">
+      <div class="admin-dialog-body">
+        <p id="admin-dlg-live-reset-title" class="admin-dialog-warn">{escape(warn_reset)}</p>
+        <form method="post">
+          <input type="hidden" name="action" value="live_reset_confirm">
+          <input type="hidden" name="redirect_tab" value="{rt}">
+          <div class="admin-dialog-actions">
+            <button type="button" class="btn" onclick="document.getElementById('admin-dlg-live-reset').close()">Zrušit</button>
+            <button type="submit" class="btn btn-danger">Resetovat a zahájit znovu</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+"""
+    head_prefix = head + tabs_html + op_panel_html + dialogs_html
     add_winery_html = f"""    <div class="box box-tight">
         <h2>Přidat vinařství</h2>
         <form method="post" class="add-winery-row">
@@ -2782,21 +3259,8 @@ def _html_guide_admin_page(
         </form>
     </div>
 """
-    summary_html = f"""    <div class="admin-readiness-summary box">
-      <div class="admin-readiness-head">
-        <p class="admin-readiness-summary-title">Připravenost akce</p>
-        <div class="admin-readiness-inline">
-          <span class="admin-readiness-chip">Vinařství celkem: <strong>{readiness["n_total"]}</strong></span>
-          <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_wines"] > 0 else ''}">Bez zadaných vzorků: <strong>{readiness["n_without_wines"]}</strong></span>
-          <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_loc"] > 0 else ''}">Bez čísla sklepu: <strong>{readiness["n_without_loc"]}</strong></span>
-          <span class="admin-readiness-chip {'admin-readiness-chip-ok' if readiness["is_ready"] else 'admin-readiness-chip-bad'}">Celkový status: <strong>{'Připraveno k publikaci' if readiness["is_ready"] else 'Nepřipraveno k publikaci'}</strong></span>
-        </div>
-      </div>
-    </div>
-"""
     parts = [head_prefix]
     if active_tab == "catalog":
-        parts.append(summary_html)
         parts.append(add_winery_html)
         parts.append('<div class="admin-grid">')
         parts.append('<aside class="admin-left" aria-label="Seznam vinařství">')
@@ -3026,6 +3490,7 @@ def _html_guide_admin_page(
       <p class="import-hint stats-note">
         Počítají se návštěvníci (prohlížeč), kteří u alespoň jednoho vína zapnuli <strong>lajk</strong>
         nebo <strong>chtěl bych koupit</strong> (data se synchronizují z aplikace návštěvníka).
+        Čísla se vztahují k <strong>aktuálnímu běhu ostrého sběru</strong> (aktivní epocha); starší běhy nejsou v této tabulce zahrnuty.
       </p>
       <div class="stats-top-grid">
         <section class="stats-top-card">
@@ -3090,6 +3555,12 @@ def _html_guide_admin_page(
       } catch (_) { window.prompt("Zkopírujte odkaz ručně:", url); }
     });
   });
+  const oStart = document.getElementById("admin-open-dlg-live-start");
+  const dlgStart = document.getElementById("admin-dlg-live-start");
+  if (oStart && dlgStart) oStart.addEventListener("click", () => dlgStart.showModal());
+  const oReset = document.getElementById("admin-open-dlg-live-reset");
+  const dlgReset = document.getElementById("admin-dlg-live-reset");
+  if (oReset && dlgReset) oReset.addEventListener("click", () => dlgReset.showModal());
 })();
 </script>
 </div>
@@ -3279,6 +3750,22 @@ def guide_admin_catalog(event_id):
                     conn.commit()
                     flash(f"Importováno {n} vín.", "success")
                 return _guide_admin_redirect(eid, None, tab="import")
+            if action == "live_start_confirm":
+                start_new_live_collection_epoch(conn, eid, started_by_admin_user_id=None)
+                conn.commit()
+                flash(
+                    "Ostrý sběr dat byl zahájen. Byl vytvořen nový aktivní běh (epocha); historie v databázi zůstává.",
+                    "success",
+                )
+                return _guide_admin_redirect(eid, None, tab=_admin_tab_from_form())
+            if action == "live_reset_confirm":
+                start_new_live_collection_epoch(conn, eid, started_by_admin_user_id=None)
+                conn.commit()
+                flash(
+                    "Předchozí běh byl ukončen a začal nový ostrý sběr (nová epocha). Historie v databázi zůstává.",
+                    "success",
+                )
+                return _guide_admin_redirect(eid, None, tab=_admin_tab_from_form())
             abort(400)
         finally:
             conn.close()
@@ -3289,12 +3776,18 @@ def guide_admin_catalog(event_id):
     tab = (request.args.get("tab") or "catalog").strip().lower()
     if tab not in ("catalog", "stats", "import"):
         tab = "catalog"
+    conn = get_connection()
+    try:
+        active_live_epoch = get_active_collection_epoch(conn, event_id)
+    finally:
+        conn.close()
     return _html_guide_admin_page(
         event_id,
         deg_row,
         catalog,
         selected_winery_id=selected_winery_id,
         active_tab=tab,
+        active_live_epoch=active_live_epoch,
     )
 
 
@@ -3412,11 +3905,78 @@ def guide_visitor_sync(event_id):
         deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
         if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
             abort(404)
-        conn.execute(
-            "DELETE FROM scoretaste_visitor_wine_flag WHERE event_id = ? AND session_key = ?",
-            (eid, sk),
-        )
+        ok, st, code = _validate_visitor_sync_epoch(conn, eid, data)
+        if not ok:
+            return jsonify(ok=False, code=code), st
+        active_epoch = get_active_collection_epoch(conn, eid)
+        epoch_id_val = active_epoch["id"] if active_epoch else None
+
+        new_map = {}
+        for wid_str, rec in wines.items():
+            ws = str(wid_str).strip()
+            if not ws.isdigit():
+                continue
+            wid = int(ws)
+            row = conn.execute(
+                """
+                SELECT w.id FROM scoretaste_wines w
+                JOIN scoretaste_wineries y ON w.winery_id = y.id
+                WHERE y.event_id = ? AND w.id = ?
+                """,
+                (eid, wid),
+            ).fetchone()
+            if not row:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            liked = bool(rec.get("liked"))
+            want = bool(rec.get("wantToBuy"))
+            new_map[wid] = (liked, want)
+
+        if active_epoch:
+            old_rows = conn.execute(
+                """
+                SELECT wine_id, liked, want_to_buy
+                FROM scoretaste_visitor_wine_flag
+                WHERE event_id = ? AND session_key = ? AND epoch_id = ?
+                """,
+                (eid, sk, active_epoch["id"]),
+            ).fetchall()
+        else:
+            old_rows = conn.execute(
+                """
+                SELECT wine_id, liked, want_to_buy
+                FROM scoretaste_visitor_wine_flag
+                WHERE event_id = ? AND session_key = ? AND epoch_id IS NULL
+                """,
+                (eid, sk),
+            ).fetchall()
+        old_map = {
+            int(r["wine_id"]): (bool(r["liked"]), bool(r["want_to_buy"]))
+            for r in old_rows
+        }
+
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _append_visitor_selection_event_logs(
+            conn, eid, epoch_id_val, sk, old_map, new_map, now
+        )
+
+        if active_epoch:
+            conn.execute(
+                """
+                DELETE FROM scoretaste_visitor_wine_flag
+                WHERE event_id = ? AND session_key = ? AND epoch_id = ?
+                """,
+                (eid, sk, active_epoch["id"]),
+            )
+        else:
+            conn.execute(
+                """
+                DELETE FROM scoretaste_visitor_wine_flag
+                WHERE event_id = ? AND session_key = ? AND epoch_id IS NULL
+                """,
+                (eid, sk),
+            )
         for wid_str, rec in wines.items():
             ws = str(wid_str).strip()
             if not ws.isdigit():
@@ -3441,10 +4001,18 @@ def guide_visitor_sync(event_id):
             conn.execute(
                 """
                 INSERT INTO scoretaste_visitor_wine_flag
-                (event_id, wine_id, session_key, liked, want_to_buy, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (event_id, wine_id, session_key, epoch_id, liked, want_to_buy, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (eid, wid, sk, 1 if liked else 0, 1 if want else 0, now),
+                (
+                    eid,
+                    wid,
+                    sk,
+                    epoch_id_val,
+                    1 if liked else 0,
+                    1 if want else 0,
+                    now,
+                ),
             )
         conn.commit()
         return jsonify(ok=True)

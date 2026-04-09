@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchEventCatalog } from "../lib/eventLoader";
 import type { EventCatalog } from "../types";
 
@@ -11,8 +11,16 @@ export type EventCatalogState =
  * Načte katalog pro event. Používej v `EventSessionLayout` (jeden zdroj pravdy);
  * child stránky berou stav přes `useSessionEventCatalog`.
  */
-export function useEventCatalog(eventId: string | undefined): EventCatalogState {
+export function useEventCatalog(eventId: string | undefined): {
+  state: EventCatalogState;
+  refetch: () => void;
+} {
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [state, setState] = useState<EventCatalogState>({ status: "loading" });
+
+  const refetch = useCallback(() => {
+    setReloadNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     if (!eventId) {
@@ -33,7 +41,7 @@ export function useEventCatalog(eventId: string | undefined): EventCatalogState 
     return () => {
       cancelled = true;
     };
-  }, [eventId]);
+  }, [eventId, reloadNonce]);
 
-  return state;
+  return { state, refetch };
 }

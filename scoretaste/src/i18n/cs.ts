@@ -40,6 +40,7 @@ export const cs = {
     modalOk: "Rozumím",
     wineCountLabel: "vín",
     filterNoResults: "Žádné vinařství neodpovídá filtru.",
+    epochSyncNote: "Stav akce byl aktualizován.",
   },
   winery: {
     title: "Vinařství",

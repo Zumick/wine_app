@@ -98,12 +98,38 @@ export async function fetchEventCatalog(eventId: string): Promise<EventCatalog> 
 
   const data = (await res.json()) as Record<string, unknown>;
 
-  const ev = data.event as EventCatalog["event"] | undefined;
-  if (!ev || typeof ev.id !== "string") {
+  const evRaw = data.event;
+  if (!evRaw || typeof evRaw !== "object") {
     throw new Error("INVALID_EVENT");
   }
-  if (ev.id !== eventId) {
+  const evo = evRaw as Record<string, unknown>;
+  const evId = typeof evo.id === "string" ? evo.id : String(evo.id ?? "");
+  if (!evId || evId !== eventId) {
     throw new Error("INVALID_EVENT");
+  }
+  const ev: EventCatalog["event"] = {
+    id: evId,
+    name: String(evo.name ?? "").trim(),
+    date: typeof evo.date === "string" ? evo.date : undefined,
+  };
+  if (typeof evo.eventId === "string") {
+    ev.eventId = evo.eventId;
+  } else {
+    ev.eventId = evId;
+  }
+  const ae = evo.activeEpochId;
+  if (ae === null || ae === undefined) {
+    ev.activeEpochId = null;
+  } else if (typeof ae === "number" && Number.isFinite(ae)) {
+    ev.activeEpochId = ae;
+  } else if (typeof ae === "string" && ae.trim() && /^\d+$/.test(ae.trim())) {
+    ev.activeEpochId = parseInt(ae.trim(), 10);
+  }
+  const ls = evo.liveStartedAt;
+  if (ls === null || ls === undefined) {
+    ev.liveStartedAt = null;
+  } else if (typeof ls === "string") {
+    ev.liveStartedAt = ls.trim() || null;
   }
 
   const rawWineries = Array.isArray(data.wineries) ? data.wineries : [];

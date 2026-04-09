@@ -15,6 +15,7 @@ import {
   setWineStarLevel,
   toggleWineryVisited,
   wineStarLevel,
+  type VisitorEpochScope,
   type WineStarLevel,
 } from "../lib/visitorStorage";
 import type {
@@ -36,6 +37,13 @@ type VisitorActionsValue = {
 
 const VisitorActionsContext = createContext<VisitorActionsValue | null>(null);
 
+function catalogEpochScope(catalog: EventCatalog | undefined): VisitorEpochScope {
+  if (!catalog) return null;
+  const v = catalog.event.activeEpochId;
+  if (v === undefined || v === null) return null;
+  return v;
+}
+
 export function VisitorActionsProvider({
   eventId,
   catalog,
@@ -45,18 +53,39 @@ export function VisitorActionsProvider({
   catalog?: EventCatalog;
   children: ReactNode;
 }) {
+  const epochScope = catalogEpochScope(catalog);
+  const epochDep = catalog
+    ? `${eventId}:${epochScope === null ? "none" : String(epochScope)}`
+    : "loading";
+
   const [blob, setBlob] = useState<VisitorActionsBlob>(() =>
-    loadVisitorActions(eventId),
+    emptyBlobForScope(eventId, catalog),
   );
 
-  useEffect(() => {
-    setBlob(loadVisitorActions(eventId));
-  }, [eventId]);
+  function emptyBlobForScope(
+    eid: string,
+    cat: EventCatalog | undefined,
+  ): VisitorActionsBlob {
+    const es = catalogEpochScope(cat);
+    return {
+      schemaVersion: 1,
+      eventId: eid,
+      epochScope: es,
+      actions: {},
+      visitedWineries: {},
+    };
+  }
 
   useEffect(() => {
-    if (!catalog) return;
-    setBlob((prev) => pruneVisitorActionsBlob(catalog, prev));
-  }, [eventId, catalog]);
+    if (!catalog) {
+      setBlob(emptyBlobForScope(eventId, undefined));
+      return;
+    }
+    const es = catalogEpochScope(catalog);
+    let b = loadVisitorActions(eventId, es);
+    b = pruneVisitorActionsBlob(catalog, b, es);
+    setBlob(b);
+  }, [eventId, epochDep, catalog]);
 
   const wineryIdByWineId = useMemo(() => {
     const map: Record<string, string> = {};
@@ -68,31 +97,35 @@ export function VisitorActionsProvider({
 
   const cycleStarRating = useCallback(
     (wineId: string) => {
-      let next = cycleWineStarLevel(eventId, wineId);
+      if (!catalog) return;
+      const es = catalogEpochScope(catalog);
+      let next = cycleWineStarLevel(eventId, wineId, es);
       const rec = next.actions[wineId];
       if (rec && wineStarLevel(rec) >= 1) {
         const wineryId = wineryIdByWineId[wineId];
         if (wineryId) {
-          next = markWineryVisited(eventId, wineryId);
+          next = markWineryVisited(eventId, wineryId, es);
         }
       }
       setBlob(next);
     },
-    [eventId, wineryIdByWineId],
+    [eventId, wineryIdByWineId, catalog],
   );
 
   const setStarLevel = useCallback(
     (wineId: string, level: WineStarLevel) => {
-      let next = setWineStarLevel(eventId, wineId, level);
+      if (!catalog) return;
+      const es = catalogEpochScope(catalog);
+      let next = setWineStarLevel(eventId, wineId, level, es);
       if (level >= 1) {
         const wineryId = wineryIdByWineId[wineId];
         if (wineryId) {
-          next = markWineryVisited(eventId, wineryId);
+          next = markWineryVisited(eventId, wineryId, es);
         }
       }
       setBlob(next);
     },
-    [eventId, wineryIdByWineId],
+    [eventId, wineryIdByWineId, catalog],
   );
 
   const getRecord = useCallback(
@@ -121,9 +154,11 @@ export function VisitorActionsProvider({
 
   const toggleWineryVisitedCb = useCallback(
     (wineryId: string) => {
-      setBlob(toggleWineryVisited(eventId, wineryId));
+      if (!catalog) return;
+      const es = catalogEpochScope(catalog);
+      setBlob(toggleWineryVisited(eventId, wineryId, es));
     },
-    [eventId],
+    [eventId, catalog],
   );
 
   const value = useMemo(

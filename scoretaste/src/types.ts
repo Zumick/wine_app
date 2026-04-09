@@ -1,7 +1,13 @@
 export type Event = {
   id: string;
+  /** Stejné jako `id` (z API). */
+  eventId?: string;
   name: string;
   date?: string;
+  /** Aktivní epocha ostrého sběru; null = žádný ostrý běh. */
+  activeEpochId?: number | null;
+  /** ISO začátek aktivní epochy. */
+  liveStartedAt?: string | null;
 };
 
 export type Winery = {
@@ -63,10 +69,15 @@ export type VisitorWineAction = {
   updatedAt: string;
 };
 
-/** Stored under `scoretaste:visitor:{eventId}` */
+/**
+ * Ukládá se pod `scoretaste:visitor:{eventId}:epoch:{epochSegment}`.
+ * Legacy klíč bez epochy se při `activeEpochId === null` jednorázově migruje.
+ */
 export type VisitorActionsBlob = {
   schemaVersion: 1;
   eventId: string;
+  /** Odpovídá serverovému `activeEpochId` pro tento blob; null = režim bez aktivní epochy. */
+  epochScope?: number | null;
   actions: Record<string, VisitorWineActionRecord>;
   /** wineryId → navštívený sklep (jen v tomto zařízení) */
   visitedWineries?: Record<string, boolean>;
