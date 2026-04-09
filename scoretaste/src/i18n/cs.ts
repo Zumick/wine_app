@@ -27,13 +27,13 @@ export const cs = {
     infoBody: [
       "Průvodce degustací",
       "",
-      "Pomůže vám zapamatovat si vína, která vám během akce chutnají.",
+      "Vyberte vinařství a označujte vína, která vám chutnají:",
       "",
-      "U každého vína klepněte na hvězdu vlevo: prázdná → oblíbené → TOP → znovu prázdná.",
+      "V Moje vína klepnutím na hvězdu přepínáte mezi oblíbené a TOP.",
+      "Dlouhým podržením symbolu hvězdy víno odeberete.",
+      "Seznam vín můžete sdílet.",
       "",
-      "Vaše volby ukládáme anonymně pro potřeby této akce. Organizátor díky tomu získá souhrnný přehled o zájmu o jednotlivá vína.",
-      "",
-      "Data nejsou spojená s vaší identitou a slouží jen pro tuto akci.",
+      "Vaše volby se ukládají anonymně pro tuto akci.",
     ].join("\n"),
     infoFooterMadeBy: "made by",
     modalCloseAria: "Zavřít",
@@ -64,13 +64,23 @@ export const cs = {
   wine: {
     starAriaNone: "Hvězda: bez označení. Klepnutím uložit mezi oblíbená.",
     starAriaFavorite: "Hvězda: oblíbené. Klepnutím zvýraznit jako TOP.",
-    starAriaTop: "Hvězda: TOP. Klepnutím zrušit označení.",
+    starAriaTop: "Hvězda: TOP. Klepnutím vrátit na oblíbené.",
   },
   myWines: {
     title: "Moje vína",
     empty:
       "Zatím nemáte žádná označená vína — u vinařství klepněte na hvězdu vlevo u řádku vína.",
     emptySavedCta: "Přejít na seznam vinařství",
+    showGrouped: "Podle vinařství",
+    showFlat: "Zobrazit seznam",
+    shareAria: "Sdílet seznam vín",
+    copiedToast: "Seznam zkopírován",
+    removalCountdown: "Odstranění za {seconds} s",
+    cancelRemoval: "Zrušit",
+    cancelRemovalAria:
+      "Probíhá odpočet odstranění. Klepnutím zrušit odstraňování.",
+    topLongPressAria:
+      "Hvězda: uložené víno. Klepnutím přepínáte oblíbené/TOP. Podržením spustit odstranění.",
     removedToast: "Víno odstraněno",
     undo: "Zpět",
   },

@@ -169,7 +169,9 @@ export function cycleWineStarLevel(
 ): VisitorActionsBlob {
   const blob = loadVisitorActions(eventId);
   const cur = getOrCreate(blob.actions, wineId);
-  const next = (((wineStarLevel(cur) + 1) % 3) as WineStarLevel);
+  const current = wineStarLevel(cur);
+  const next: WineStarLevel =
+    current === 0 ? 1 : current === 1 ? 2 : 1;
   return setWineStarLevel(eventId, wineId, next);
 }
 
