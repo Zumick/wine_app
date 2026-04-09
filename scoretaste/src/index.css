@@ -152,7 +152,7 @@ ul {
   flex-shrink: 0;
   width: var(--header-info-size);
   height: var(--header-info-size);
-  border: 1px solid var(--color-border-soft);
+  border: 2px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
   font-size: var(--font-size-meta);
@@ -324,7 +324,97 @@ ul {
   cursor: pointer;
 }
 
-/* Winery list — plochý seznam */
+/* Winery list — nadpis + Seznam/Mapa v jednom řádku */
+.visitor-winery-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  min-width: 0;
+}
+
+.visitor-page-heading--winery-row {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.visitor-browse-switch {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  margin: 0;
+}
+
+.visitor-browse-switch-btn {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.visitor-browse-switch-btn-active {
+  background: var(--color-primary-soft);
+  border-color: var(--color-border);
+  color: var(--color-primary);
+}
+
+.visitor-map-zoom-root {
+  width: 100%;
+  margin-bottom: var(--space-2);
+}
+
+.visitor-map-transform-wrapper {
+  background: var(--color-border-soft);
+}
+
+.visitor-map-layer {
+  position: relative;
+  display: block;
+  width: 100%;
+  line-height: 0;
+}
+
+.visitor-map-img {
+  width: 100%;
+  height: auto;
+  display: block;
+  vertical-align: top;
+  user-select: none;
+}
+
+.visitor-map-marker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 5px;
+  border: 2px solid #1f2937;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.95);
+  color: #111827;
+  font-size: 11px;
+  font-weight: var(--font-weight-bold);
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  z-index: 2;
+}
+
+.visitor-map-marker:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
 .visitor-winery-list {
   list-style: none;
   padding: 0;
@@ -530,8 +620,8 @@ ul {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   border: none;
   background: transparent;
   margin: 0;
@@ -542,9 +632,13 @@ ul {
 }
 
 .visitor-mywines-share-icon {
-  width: 17px;
-  height: 17px;
+  width: 22px;
+  height: 22px;
+  max-width: 22px;
+  max-height: 22px;
   display: block;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .visitor-mywines-share-btn:disabled {
@@ -870,7 +964,7 @@ ul {
   height: var(--top-circle-size);
   border-radius: var(--radius-pill);
   background: transparent;
-  box-shadow: 0 0 0 1px var(--color-star-top-ring);
+  box-shadow: 0 0 0 2px var(--color-star-top-ring);
 }
 
 .visitor-wine-star:active {
@@ -883,7 +977,7 @@ ul {
 }
 
 .visitor-wine-star--lvl-2:focus-visible {
-  box-shadow: 0 0 0 1px var(--color-star-top-ring),
+  box-shadow: 0 0 0 2px var(--color-star-top-ring),
     0 0 0 3px var(--color-primary-soft);
 }
 

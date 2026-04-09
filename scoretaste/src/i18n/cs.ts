@@ -43,6 +43,11 @@ export const cs = {
   },
   winery: {
     title: "Vinařství",
+    viewMap: "Mapa",
+    viewList: "Seznam",
+    mapSwitchAria: "Přepnout mezi seznamem a mapou",
+    mapImageAlt: "Mapa areálu akce",
+    mapMarkerAria: "Otevřít detail vinařství",
     detailToggleAria: "Zobrazit nebo skrýt poznámku a web vinařství",
     visitedToggleAriaOn: "Označit sklep jako navštívený",
     visitedToggleAriaOff: "Zrušit označení navštíveného sklepu",

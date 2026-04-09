@@ -1,4 +1,4 @@
-import type { EventCatalog, Wine, Winery } from "../types";
+import type { EventCatalog, MapHotspot, Wine, Winery } from "../types";
 import { normalizeWineColor } from "./wineSort";
 
 function parseWinery(raw: unknown): Winery {
@@ -15,6 +15,39 @@ function parseWinery(raw: unknown): Winery {
     throw new Error("INVALID_EVENT");
   }
   return { id, eventId, name, locationNumber };
+}
+
+function parseMapHotspot(raw: unknown): MapHotspot | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const wineryId = String(o.wineryId ?? "").trim();
+  const xPercent = Number(o.xPercent);
+  const yPercent = Number(o.yPercent);
+  if (!wineryId || !Number.isFinite(xPercent) || !Number.isFinite(yPercent)) {
+    return null;
+  }
+  return {
+    wineryId,
+    cellarNumber: String(o.cellarNumber ?? "").trim(),
+    xPercent,
+    yPercent,
+  };
+}
+
+function parseMapHotspotsList(raw: unknown): MapHotspot[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const byWid = new Map<string, MapHotspot>();
+  for (const item of raw) {
+    const h = parseMapHotspot(item);
+    if (h) {
+      byWid.set(h.wineryId, h);
+    }
+  }
+  return Array.from(byWid.values());
 }
 
 function parseWine(raw: unknown): Wine {
@@ -98,5 +131,7 @@ export async function fetchEventCatalog(eventId: string): Promise<EventCatalog> 
     throw new Error("INVALID_EVENT");
   }
 
-  return { event: ev, wineries, wines };
+  const mapHotspots = parseMapHotspotsList(data.mapHotspots);
+
+  return { event: ev, wineries, wines, mapHotspots };
 }

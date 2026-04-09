@@ -13,8 +13,8 @@ import {
   type WineStarLevel,
 } from "../lib/visitorStorage";
 import { wineHasExpandableDetail, wineSecondaryLine } from "../lib/wineDisplay";
-import { compareWinesByColorThenLabel } from "../lib/wineSort";
 import type { EventCatalog, Wine, Winery } from "../types";
+import iconShare from "../assets/icon-share.png";
 
 const PENDING_REMOVE_SECONDS = 5;
 const PENDING_REMOVE_MS = PENDING_REMOVE_SECONDS * 1000;
@@ -348,10 +348,9 @@ export function MyWinesPage() {
       .filter((w) => validWineIds.has(w.id))
       .map((wine) => ({ wine, level: wineStarLevel(getRecord(wine.id)) }))
       .filter((row) => row.level >= 1)
-      .sort((a, b) => {
-        if (a.level !== b.level) return b.level - a.level;
-        return compareWinesByColorThenLabel(a.wine, b.wine);
-      })
+      .sort((a, b) =>
+        a.wine.label.localeCompare(b.wine.label, "cs", { sensitivity: "base" }),
+      )
       .map((row) => ({
         ...row,
         winery: wineryById.get(row.wine.wineryId),
@@ -449,16 +448,16 @@ export function MyWinesPage() {
             onClick={handleShareList}
             disabled={starredRows.length === 0}
           >
-            <svg
+            <img
+              src={iconShare}
+              alt=""
               className="visitor-mywines-share-icon"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <path
-                d="M18 8a3 3 0 1 0-2.82-4H15a3 3 0 0 0 .18 1.01L8.9 8.16a3 3 0 0 0-1.9-.66 3 3 0 1 0 1.9 5.34l6.28 3.15A3 3 0 0 0 15 17a3 3 0 1 0 .18 1.01L8.9 14.85A3 3 0 0 0 9 14c0-.3-.04-.59-.1-.85l6.28-3.14c.52.61 1.29.99 2.16.99z"
-                fill="currentColor"
-              />
-            </svg>
+              width={22}
+              height={22}
+              decoding="async"
+              draggable={false}
+              aria-hidden={true}
+            />
           </button>
         </div>
       </div>

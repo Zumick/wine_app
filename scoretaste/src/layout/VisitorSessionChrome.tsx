@@ -42,13 +42,12 @@ function VisitorEventLogo({ eventId }: { eventId: string }) {
 
 export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
+  const { wineryFilter, setWineryFilter, wineryBrowseView } = outletContext;
   const listMatch = useMatch({
     path: "/e/:eventId/wineries",
     end: true,
   });
-  const showFilter = Boolean(listMatch);
-
-  const { wineryFilter, setWineryFilter } = outletContext;
+  const showFilter = Boolean(listMatch) && wineryBrowseView === "list";
   const eventName = catalog.event.name.trim() || t("guide.title");
 
   return (

@@ -414,7 +414,27 @@ def _scoretaste_catalog_from_db(conn, event_id):
         if desc is not None and str(desc).strip():
             w["description"] = str(desc).strip()
         wines.append(w)
-    return {"event": event, "wineries": wineries, "wines": wines}
+    map_hotspots = []
+    mh_rows = conn.execute(
+        """
+        SELECT winery_id, cellar_number, x_percent, y_percent
+        FROM scoretaste_event_map_hotspots
+        WHERE event_id = ?
+        ORDER BY winery_id
+        """,
+        (eid,),
+    ).fetchall()
+    for r in mh_rows:
+        cn = r["cellar_number"]
+        map_hotspots.append(
+            {
+                "wineryId": str(r["winery_id"]),
+                "cellarNumber": (cn if cn is not None else "") or "",
+                "xPercent": float(r["x_percent"]),
+                "yPercent": float(r["y_percent"]),
+            }
+        )
+    return {"event": event, "wineries": wineries, "wines": wines, "mapHotspots": map_hotspots}
 
 
 def _scoretaste_import_json_catalog_to_db(conn, event_id, catalog_dict):
@@ -953,6 +973,19 @@ def init_db():
             PRIMARY KEY (event_id, wine_id, session_key),
             FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE,
             FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scoretaste_event_map_hotspots (
+            event_id INTEGER NOT NULL,
+            winery_id INTEGER NOT NULL,
+            cellar_number TEXT,
+            x_percent REAL NOT NULL,
+            y_percent REAL NOT NULL,
+            PRIMARY KEY (event_id, winery_id),
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+            FOREIGN KEY (winery_id) REFERENCES scoretaste_wineries(id) ON DELETE CASCADE
         )
     """)
 
@@ -2719,6 +2752,7 @@ def _html_guide_admin_page(
     cat_href = escape(_admin_tab_url(admin_base, "catalog", sel or None))
     stats_href = escape(_admin_tab_url(admin_base, "stats"))
     imp_href = escape(_admin_tab_url(admin_base, "import"))
+    map_edit_href = escape(f"{URL_GUIDE_APP_PREFIX}/e/{int(event_id)}/map-editor")
     tc = " admin-tab-active" if active_tab == "catalog" else ""
     ts = " admin-tab-active" if active_tab == "stats" else ""
     ti = " admin-tab-active" if active_tab == "import" else ""
@@ -2727,6 +2761,7 @@ def _html_guide_admin_page(
       <a class="admin-tab{tc}" href="{cat_href}">Katalog</a>
       <a class="admin-tab{ts}" href="{stats_href}">Statistiky</a>
       <a class="admin-tab{ti}" href="{imp_href}">Import CSV</a>
+      <a class="admin-tab" href="{map_edit_href}">Editace mapy</a>
     </nav>
 """
     rt = escape(active_tab)
@@ -3295,6 +3330,73 @@ def guide_event_data(event_id):
     )
 
 
+@app.route("/guide/data/events/<int:event_id>/map-hotspots", methods=["PUT"])
+def guide_event_map_hotspots_put(event_id):
+    """Uložení pozic hotspotů na mapě akce (admin; stejný přístup jako správa katalogu)."""
+    eid = int(event_id)
+    data = request.get_json(silent=True) or {}
+    hotspots = data.get("hotspots")
+    if not isinstance(hotspots, list):
+        return jsonify(ok=False, error="hotspots"), 400
+    conn = get_connection()
+    try:
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            abort(404)
+        rows_by_wid = {}
+        for item in hotspots:
+            if not isinstance(item, dict):
+                return jsonify(ok=False, error="item"), 400
+            wid_s = str(item.get("wineryId") or "").strip()
+            if not wid_s.isdigit():
+                return jsonify(ok=False, error="wineryId"), 400
+            wid = int(wid_s)
+            try:
+                xp = float(item.get("xPercent"))
+                yp = float(item.get("yPercent"))
+            except (TypeError, ValueError):
+                return jsonify(ok=False, error="coordinates"), 400
+            if not (0.0 <= xp <= 100.0 and 0.0 <= yp <= 100.0):
+                return jsonify(ok=False, error="range"), 400
+            cellar = item.get("cellarNumber")
+            cellar_s = (
+                str(cellar).strip()
+                if cellar is not None and str(cellar).strip()
+                else None
+            )
+            wy = conn.execute(
+                """
+                SELECT id, location_number FROM scoretaste_wineries
+                WHERE event_id = ? AND id = ?
+                """,
+                (eid, wid),
+            ).fetchone()
+            if not wy:
+                return jsonify(ok=False, error="winery"), 400
+            if cellar_s is None and wy["location_number"] is not None:
+                ln = str(wy["location_number"]).strip()
+                cellar_s = ln if ln else None
+            rows_by_wid[wid] = (eid, wid, cellar_s, xp, yp)
+        rows = list(rows_by_wid.values())
+        conn.execute(
+            "DELETE FROM scoretaste_event_map_hotspots WHERE event_id = ?",
+            (eid,),
+        )
+        for e, wid, cellar_s, xp, yp in rows:
+            conn.execute(
+                """
+                INSERT INTO scoretaste_event_map_hotspots
+                (event_id, winery_id, cellar_number, x_percent, y_percent)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (e, wid, cellar_s, xp, yp),
+            )
+        conn.commit()
+        return jsonify(ok=True)
+    finally:
+        conn.close()
+
+
 @app.route("/guide/data/events/<int:event_id>/visitor-sync", methods=["POST"])
 def guide_visitor_sync(event_id):
     eid = int(event_id)
@@ -3682,6 +3784,7 @@ def guide_contributor_catalog(event_id, winery_id):
 @app.route("/guide/e/<event_id>/wineries")
 @app.route("/guide/e/<event_id>/wineries/<winery_id>")
 @app.route("/guide/e/<event_id>/my")
+@app.route("/guide/e/<event_id>/map-editor")
 def guide_scoretaste_app(event_id, winery_id=None):
     return _scoretaste_index()
 

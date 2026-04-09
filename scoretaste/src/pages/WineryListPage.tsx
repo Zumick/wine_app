@@ -1,7 +1,14 @@
+import { useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
+import { EventWineryMapView } from "../components/EventWineryMapView";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
 import { useVisitorActions } from "../context/VisitorActionsContext";
-import { useSessionEventCatalog, useWineryListFilter } from "../hooks/useSessionEventCatalog";
+import {
+  useSessionEventCatalog,
+  useWineryBrowseView,
+  useWineryListFilter,
+} from "../hooks/useSessionEventCatalog";
+import { hasEventMapImage } from "../lib/eventMapAsset";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import type { EventCatalog, Winery } from "../types";
@@ -30,7 +37,16 @@ export function WineryListPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const state = useSessionEventCatalog();
   const [wineryFilter] = useWineryListFilter();
+  const [browseView, setBrowseView] = useWineryBrowseView();
   const { isWineryVisited, toggleWineryVisited } = useVisitorActions();
+
+  const hasMap = Boolean(eventId && hasEventMapImage(eventId));
+
+  useEffect(() => {
+    if (!hasMap && browseView === "map") {
+      setBrowseView("list");
+    }
+  }, [hasMap, browseView, setBrowseView]);
 
   if (!eventId) {
     return <ErrorBlock title={catalogErrorTitle("MISSING_EVENT_ID")} />;
@@ -55,8 +71,37 @@ export function WineryListPage() {
 
   return (
     <PageMain>
-      <h2 className="visitor-page-heading">{t("winery.title")}</h2>
-      {rows.length === 0 ? (
+      <div className="visitor-winery-page-head">
+        <h2 className="visitor-page-heading visitor-page-heading--winery-row">
+          {t("winery.title")}
+        </h2>
+        {hasMap ? (
+          <div
+            className="visitor-browse-switch"
+            role="group"
+            aria-label={t("winery.mapSwitchAria")}
+          >
+            <button
+              type="button"
+              className={`visitor-browse-switch-btn${browseView === "list" ? " visitor-browse-switch-btn-active" : ""}`}
+              onClick={() => setBrowseView("list")}
+            >
+              {t("winery.viewList")}
+            </button>
+            <button
+              type="button"
+              className={`visitor-browse-switch-btn${browseView === "map" ? " visitor-browse-switch-btn-active" : ""}`}
+              onClick={() => setBrowseView("map")}
+            >
+              {t("winery.viewMap")}
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {browseView === "map" && hasMap ? (
+        <EventWineryMapView eventId={eventId} catalog={catalog} />
+      ) : rows.length === 0 ? (
         <p>
           {emptyBecauseFilter
             ? t("visitor.filterNoResults")

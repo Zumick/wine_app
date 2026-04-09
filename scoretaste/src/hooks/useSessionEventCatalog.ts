@@ -1,5 +1,8 @@
 import { useOutletContext } from "react-router-dom";
-import type { VisitorSessionOutletContext } from "../layout/visitorSessionContext";
+import type {
+  VisitorSessionOutletContext,
+  WineryBrowseView,
+} from "../layout/visitorSessionContext";
 import type { EventCatalogState } from "./useEventCatalog";
 
 /**
@@ -24,4 +27,17 @@ export function useWineryListFilter(): [string, (v: string) => void] {
     );
   }
   return [ctx.wineryFilter, ctx.setWineryFilter];
+}
+
+export function useWineryBrowseView(): [
+  WineryBrowseView,
+  (v: WineryBrowseView) => void,
+] {
+  const ctx = useOutletContext<VisitorSessionOutletContext | undefined>();
+  if (ctx === undefined) {
+    throw new Error(
+      "useWineryBrowseView must be used under EventSessionLayout",
+    );
+  }
+  return [ctx.wineryBrowseView, ctx.setWineryBrowseView];
 }

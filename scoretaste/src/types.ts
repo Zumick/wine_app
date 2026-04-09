@@ -30,11 +30,21 @@ export type Wine = {
   color?: WineColor;
 };
 
+/** Pozice hotspotu na statické mapě akce (souřadnice v % rozměru obrázku). */
+export type MapHotspot = {
+  wineryId: string;
+  cellarNumber: string;
+  xPercent: number;
+  yPercent: number;
+};
+
 /** Root shape of `/guide/data/events/:eventId.json` */
 export type EventCatalog = {
   event: Event;
   wineries: Winery[];
   wines: Wine[];
+  /** Volitelné; chybí u starších odpovědí serveru. */
+  mapHotspots?: MapHotspot[];
 };
 
 /** One wine’s persisted flags (wine id is the key in `VisitorActionsBlob.actions`). */

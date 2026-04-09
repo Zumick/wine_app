@@ -2,21 +2,28 @@ import { useMemo, useState } from "react";
 import { Navigate, Outlet, useParams } from "react-router-dom";
 import { VisitorActionsProvider } from "../context/VisitorActionsContext";
 import { useEventCatalog } from "../hooks/useEventCatalog";
-import type { VisitorSessionOutletContext } from "./visitorSessionContext";
+import type {
+  VisitorSessionOutletContext,
+  WineryBrowseView,
+} from "./visitorSessionContext";
 import { VisitorSessionChrome } from "./VisitorSessionChrome";
 
 export function EventSessionLayout() {
   const { eventId } = useParams<{ eventId: string }>();
   const catalogState = useEventCatalog(eventId);
   const [wineryFilter, setWineryFilter] = useState("");
+  const [wineryBrowseView, setWineryBrowseView] =
+    useState<WineryBrowseView>("list");
 
   const outletContext = useMemo<VisitorSessionOutletContext>(
     () => ({
       catalogState,
       wineryFilter,
       setWineryFilter,
+      wineryBrowseView,
+      setWineryBrowseView,
     }),
-    [catalogState, wineryFilter],
+    [catalogState, wineryFilter, wineryBrowseView],
   );
 
   if (!eventId) {
