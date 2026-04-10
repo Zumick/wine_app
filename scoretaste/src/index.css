@@ -491,25 +491,55 @@ ul {
 
 .visitor-map-marker {
   position: absolute;
-  transform: translate(-50%, -50%);
-  min-width: 28px;
-  min-height: 28px;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  z-index: 2;
+  touch-action: manipulation;
+}
+
+.visitor-map-marker-dot {
+  min-width: 30px;
+  height: 30px;
   padding: 0 5px;
   border: 2px solid #1f2937;
   border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.95);
   color: #111827;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: var(--font-weight-bold);
   line-height: 1;
-  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-  z-index: 2;
+  pointer-events: none;
 }
 
 .visitor-map-marker:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .visitor-map-marker {
+    width: 40px;
+    height: 40px;
+  }
+
+  .visitor-map-marker-dot {
+    min-width: 28px;
+    height: 28px;
+    font-size: 9.5px;
+  }
 }
 
 .visitor-winery-list {
@@ -819,54 +849,6 @@ ul {
   padding-bottom: calc(4.25rem + env(safe-area-inset-bottom, 0px));
 }
 
-.visitor-mywines-ul .visitor-wine-card {
-  transition: opacity 0.18s ease, transform 0.18s ease;
-}
-
-.visitor-wine-card--mywines-exiting {
-  opacity: 0;
-  transform: translateY(-3px) scale(0.98);
-  pointer-events: none;
-}
-
-.visitor-wine-card--mywines-pending {
-  opacity: 0.62;
-  filter: saturate(0.55);
-}
-
-.visitor-wine-removal-pending {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: 3px;
-  margin-left: calc(var(--wine-icon-hit) + var(--space-2));
-  font-size: var(--font-size-meta);
-  line-height: 1.2;
-  color: var(--color-text-muted);
-}
-
-.visitor-wine-removal-countdown {
-  flex: 1;
-  min-width: 0;
-}
-
-.visitor-wine-removal-cancel {
-  flex-shrink: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
-  padding: 4px 8px;
-  font-size: var(--font-size-meta);
-  line-height: 1.2;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.visitor-wine-removal-cancel:active {
-  filter: brightness(0.97);
-}
-
 .visitor-mywines-toast {
   position: fixed;
   z-index: 200;
@@ -889,6 +871,11 @@ ul {
 .visitor-mywines-toast-text {
   flex: 1;
   min-width: 0;
+}
+
+.visitor-mywines-toast-meta {
+  margin-top: 2px;
+  opacity: 0.84;
 }
 
 .visitor-mywines-toast-undo {
@@ -1152,6 +1139,37 @@ ul {
 .visitor-wine-extra-wrap {
   margin-top: 3px;
   margin-left: calc(var(--visitor-wine-star-size) + var(--visitor-wine-inline-gap));
+}
+
+.visitor-wine-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-1);
+}
+
+.visitor-wine-remove-btn {
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  background: #fff1f2;
+  color: #b91c1c;
+  font-size: 20px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.visitor-wine-remove-btn:active {
+  filter: brightness(0.97);
+}
+
+.visitor-wine-remove-btn:focus-visible {
+  outline: 2px solid #ef4444;
+  outline-offset: 1px;
 }
 
 /* Jedno odsazení pro celý blok; .visitor-wine-line2 má vlastní margin jinde */

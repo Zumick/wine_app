@@ -2188,19 +2188,30 @@ def _html_deg_list_section(
             monitor_link = ""
             if _env_truthy("WINEAPP_PILOT_MONITOR", False):
                 monitor_link = (
-                    f' <a class="guide-admin-cat-link" href="{escape(monitor_href)}">'
+                    f'<a class="guide-admin-cat-link" href="{escape(monitor_href)}">'
                     "Pilot monitor</a>"
                 )
             parts.append(
                 f"""
         <div class="deg-row-guide">
-            {vyber}
-            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>{monitor_link}
-            <form method="post" action="{escape(post_url)}" class="deg-del-form">
-                <input type="hidden" name="action" value="smazat">
-                <input type="hidden" name="degustace_id" value="{eid}">
-                <button type="submit" class="btn-del-debug">Smazat</button>
-            </form>
+            <div class="deg-row-main">{vyber}</div>
+            <div class="deg-row-actions">
+                <div class="deg-row-links">
+                    <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>{monitor_link}
+                </div>
+                <div class="deg-row-buttons">
+                    <form method="post" action="{escape(post_url)}" class="deg-del-form" onsubmit="return confirm('Opravdu resetovat epochu sběru pro tuto akci?');">
+                        <input type="hidden" name="action" value="reset_epochy">
+                        <input type="hidden" name="degustace_id" value="{eid}">
+                        <button type="submit" class="btn-epoch-reset">Reset epochy</button>
+                    </form>
+                    <form method="post" action="{escape(post_url)}" class="deg-del-form">
+                        <input type="hidden" name="action" value="smazat">
+                        <input type="hidden" name="degustace_id" value="{eid}">
+                        <button type="submit" class="btn-danger-soft">Smazat</button>
+                    </form>
+                </div>
+            </div>
         </div>"""
             )
         else:
@@ -2285,7 +2296,7 @@ def _html_shared_home_css():
                 margin: 4px 0;
                 font-size: 14px;
             }
-            button:not(.btn-new-deg):not(.dlg-cancel) {
+            button:not(.btn-new-deg):not(.dlg-cancel):not(.btn-epoch-reset):not(.btn-danger-soft) {
                 padding: 10px 10px;
                 margin: 4px 0;
                 font-size: 14px;
@@ -2304,25 +2315,86 @@ def _html_shared_home_css():
             }
             .degustace-grid form { margin: 0; min-width: 0; }
             .deg-row-guide {
-                display: flex;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: 12px;
                 align-items: stretch;
-                gap: 8px;
                 min-width: 0;
-            }
-            .deg-row-guide > form:first-child { flex: 1; min-width: 0; }
-            .guide-admin-cat-link {
-                align-self: center;
-                font-size: 13px;
-                white-space: nowrap;
-            }
-            .btn-del-debug {
                 padding: 10px 12px;
-                font-size: 13px;
-                cursor: pointer;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #fafafa;
+            }
+            .deg-row-main { min-width: 0; }
+            .deg-row-main form { margin: 0; }
+            .deg-row-actions {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                min-width: min(200px, 100%);
+                align-items: stretch;
+            }
+            .deg-row-links {
+                display: flex;
+                gap: 8px;
+                justify-content: flex-end;
+                flex-wrap: wrap;
+            }
+            .deg-row-buttons {
+                display: flex;
+                gap: 8px;
+                justify-content: flex-end;
+                flex-wrap: wrap;
+            }
+            .deg-del-form { margin: 0; }
+            .guide-admin-cat-link {
+                font-size: 12px;
+                color: #334155;
+                text-decoration: none;
+                border: 1px solid #dbe2ea;
+                background: #f8fafc;
+                border-radius: 6px;
+                padding: 6px 8px;
                 white-space: nowrap;
+                line-height: 1.2;
+            }
+            .guide-admin-cat-link:hover {
+                background: #f1f5f9;
+                border-color: #cbd5e1;
+            }
+            .btn-epoch-reset,
+            .btn-danger-soft {
+                margin: 0;
+                padding: 8px 10px;
+                font-size: 12px;
+                line-height: 1.2;
+                cursor: pointer;
+                border-radius: 6px;
+                white-space: nowrap;
+            }
+            .btn-epoch-reset {
+                background: #fff7ed;
+                border: 1px solid #fdba74;
+                color: #9a3412;
+            }
+            .btn-danger-soft {
                 background: #fee2e2;
                 border: 1px solid #fca5a5;
                 color: #991b1b;
+            }
+            @media (max-width: 760px) {
+                .deg-row-guide {
+                    grid-template-columns: 1fr;
+                }
+                .deg-row-actions {
+                    min-width: 0;
+                    border-top: 1px solid #e5e7eb;
+                    padding-top: 8px;
+                }
+                .deg-row-links,
+                .deg-row-buttons {
+                    justify-content: flex-start;
+                }
             }
             .menu-button {
                 width: 100%;
@@ -2515,6 +2587,29 @@ def _handle_home_typ(typ_akce_route):
     conn = get_connection()
     if request.method == "POST":
         action = request.form.get("action")
+        if action == "reset_epochy":
+            if ((request.path or "").rstrip("/") or "/") != URL_GUIDE:
+                conn.close()
+                abort(400)
+            raw_id = request.form.get("degustace_id")
+            if not raw_id or not str(raw_id).isdigit():
+                conn.close()
+                abort(400)
+            deg_id = int(raw_id)
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            if not deg_row:
+                conn.close()
+                abort(404)
+            if _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+                conn.close()
+                return redirect(URL_GUIDE)
+            start_new_live_collection_epoch(conn, deg_id, started_by_admin_user_id=None)
+            conn.commit()
+            conn.close()
+            return redirect(URL_GUIDE)
         if action == "smazat":
             if ((request.path or "").rstrip("/") or "/") != URL_GUIDE:
                 conn.close()
@@ -3563,11 +3658,11 @@ def _html_guide_admin_page(
     <nav class="admin-tabs" aria-label="Sekce správy">
       <a class="admin-tab{tc}" href="{cat_href}">Katalog</a>
       <a class="admin-tab{ts}" href="{stats_href}">Statistiky</a>
-      <a class="admin-tab{ti}" href="{imp_href}">Import CSV</a>
       <a class="admin-tab{trp}" href="{report_href}">Report pro organizátora</a>
       <a class="admin-tab" href="{map_edit_href}">Editace mapy</a>
+      <a class="admin-tab{ti}" href="{imp_href}">Import CSV</a>
     </nav>
-"""
+    """
     rt = escape(active_tab)
     ts_disp = escape(_format_live_started_cz(live_started)) if live_started else ""
     epoch_num_disp = ""

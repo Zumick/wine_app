@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WineActionToggles } from "../components/WineActionToggles";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
@@ -12,7 +12,10 @@ import {
   wineryWebHref,
 } from "../lib/wineDisplay";
 import { t } from "../i18n";
+import { type WineStarLevel } from "../lib/visitorStorage";
 import type { EventCatalog, Wine } from "../types";
+
+const UNDO_SECONDS = 5;
 
 function winesForWinery(catalog: EventCatalog, wineryId: string): Wine[] {
   return catalog.wines.filter((w) => w.wineryId === wineryId);
@@ -37,13 +40,29 @@ function wineryHasExpandableDetail(note?: string, web?: string): boolean {
   return Boolean((note && note.trim()) || (web && web.trim()));
 }
 
-function WineryWineRow({ wine }: { wine: Wine }) {
+type UndoPayload = {
+  wineId: string;
+  previousLevel: Exclude<WineStarLevel, 0>;
+  wineLabel: string;
+  cellarNumber?: string;
+};
+
+function WineryWineRow({
+  wine,
+  cellarNumber,
+  onRemove,
+}: {
+  wine: Wine;
+  cellarNumber?: string;
+  onRemove: (wine: Wine, previousLevel: Exclude<WineStarLevel, 0>, cellarNumber?: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const line2 = wineSecondaryLine(wine);
   const hasDescription = Boolean(wine.description?.trim());
   const hasDetail = wineHasExpandableDetail(wine);
   const { getStarLevel } = useVisitorActions();
-  const isTop = getStarLevel(wine.id) === 2;
+  const level = getStarLevel(wine.id);
+  const isTop = level === 2;
 
   const toggleRow = () => {
     if (hasDetail) setOpen((v) => !v);
@@ -76,6 +95,21 @@ function WineryWineRow({ wine }: { wine: Wine }) {
           {hasDescription ? (
             <p className="visitor-wine-extra-note">{wine.description?.trim()}</p>
           ) : null}
+          {level >= 1 ? (
+            <div className="visitor-wine-detail-actions">
+              <button
+                type="button"
+                className="visitor-wine-remove-btn"
+                aria-label="Odebrat víno"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(wine, level as Exclude<WineStarLevel, 0>, cellarNumber);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </li>
@@ -89,6 +123,74 @@ export function WineryDetailPage() {
   }>();
   const state = useSessionEventCatalog();
   const [detailOpen, setDetailOpen] = useState(false);
+  const { setStarLevel } = useVisitorActions();
+  const [undoToast, setUndoToast] = useState<UndoPayload | null>(null);
+  const [undoSecondsLeft, setUndoSecondsLeft] = useState<number>(UNDO_SECONDS);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearUndoTimers = useCallback(() => {
+    if (toastTimerRef.current !== null) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    if (toastTickRef.current !== null) {
+      clearInterval(toastTickRef.current);
+      toastTickRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearUndoTimers(), [clearUndoTimers]);
+
+  const dismissUndo = useCallback(() => {
+    clearUndoTimers();
+    setUndoToast(null);
+    setUndoSecondsLeft(UNDO_SECONDS);
+  }, [clearUndoTimers]);
+
+  const showUndo = useCallback(
+    (payload: UndoPayload) => {
+      clearUndoTimers();
+      setUndoToast(payload);
+      setUndoSecondsLeft(UNDO_SECONDS);
+      toastTickRef.current = setInterval(() => {
+        setUndoSecondsLeft((prev) => (prev > 1 ? prev - 1 : 1));
+      }, 1000);
+      toastTimerRef.current = setTimeout(() => {
+        setUndoToast(null);
+        setUndoSecondsLeft(UNDO_SECONDS);
+        if (toastTickRef.current !== null) {
+          clearInterval(toastTickRef.current);
+          toastTickRef.current = null;
+        }
+        toastTimerRef.current = null;
+      }, UNDO_SECONDS * 1000);
+    },
+    [clearUndoTimers],
+  );
+
+  const handleRemoveWine = useCallback(
+    (
+      wine: Wine,
+      previousLevel: Exclude<WineStarLevel, 0>,
+      cellarNumber?: string,
+    ) => {
+      setStarLevel(wine.id, 0);
+      showUndo({
+        wineId: wine.id,
+        previousLevel,
+        wineLabel: wine.label,
+        cellarNumber: (cellarNumber ?? "").trim() || undefined,
+      });
+    },
+    [setStarLevel, showUndo],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (!undoToast) return;
+    setStarLevel(undoToast.wineId, undoToast.previousLevel);
+    dismissUndo();
+  }, [dismissUndo, setStarLevel, undoToast]);
 
   if (!eventId || !wineryId) {
     return (
@@ -132,7 +234,7 @@ export function WineryDetailPage() {
   const expandable = wineryHasExpandableDetail(winery.note, winery.web);
 
   return (
-    <PageMain>
+    <PageMain className={undoToast ? "visitor-mywines-page--toast" : undefined}>
       <div className="visitor-winery-page-head">
         <div className="visitor-winery-page-head-main">
           <span
@@ -192,13 +294,34 @@ export function WineryDetailPage() {
               </h3>
               <ul className="visitor-wine-list-block">
                 {groupWines.map((wine: Wine) => (
-                  <WineryWineRow key={wine.id} wine={wine} />
+                  <WineryWineRow
+                    key={wine.id}
+                    wine={wine}
+                    cellarNumber={winery.locationNumber}
+                    onRemove={handleRemoveWine}
+                  />
                 ))}
               </ul>
             </section>
           ))}
         </div>
       )}
+      {undoToast ? (
+        <div className="visitor-mywines-toast" role="status" aria-live="polite">
+          <div className="visitor-mywines-toast-text">
+            <div>
+              Odebráno: {undoToast.wineLabel}
+              {undoToast.cellarNumber
+                ? ` · sklep ${undoToast.cellarNumber}`
+                : ""}
+            </div>
+            <div className="visitor-mywines-toast-meta">{undoSecondsLeft}s</div>
+          </div>
+          <button type="button" className="visitor-mywines-toast-undo" onClick={handleUndo}>
+            Zpět
+          </button>
+        </div>
+      ) : null}
     </PageMain>
   );
 }

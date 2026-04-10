@@ -47,43 +47,49 @@ export function EventWineryMapView({ eventId, catalog }: Props) {
         panning={{ excluded: ["visitor-map-marker"] }}
         pinch={{ step: 5 }}
       >
-        <TransformComponent
-          wrapperClass="visitor-map-transform-wrapper"
-          contentClass="visitor-map-transform-content"
-          wrapperStyle={{
-            width: "100%",
-            maxHeight: "min(72vh, 640px)",
-            borderRadius: "var(--radius-sm)",
-            overflow: "hidden",
-            touchAction: "none",
-          }}
-          contentStyle={{ width: "100%" }}
-        >
-          <div className="visitor-map-layer">
-            <img
-              className="visitor-map-img"
-              src={mapSrc}
-              alt={t("winery.mapImageAlt")}
-              decoding="async"
-              draggable={false}
-            />
-            {hotspots.map((h) => (
-              <button
-                key={h.wineryId}
-                type="button"
-                className="visitor-map-marker"
-                style={{
-                  left: `${h.xPercent}%`,
-                  top: `${h.yPercent}%`,
-                }}
-                aria-label={t("winery.mapMarkerAria")}
-                onClick={() => navigate(h.wineryId)}
-              >
-                {markerLabel(h)}
-              </button>
-            ))}
-          </div>
-        </TransformComponent>
+        {({ state }) => {
+          const markerScale = 1 / Math.max(state.scale || 1, 0.0001);
+          return (
+            <TransformComponent
+              wrapperClass="visitor-map-transform-wrapper"
+              contentClass="visitor-map-transform-content"
+              wrapperStyle={{
+                width: "100%",
+                maxHeight: "min(72vh, 640px)",
+                borderRadius: "var(--radius-sm)",
+                overflow: "hidden",
+                touchAction: "none",
+              }}
+              contentStyle={{ width: "100%" }}
+            >
+              <div className="visitor-map-layer">
+                <img
+                  className="visitor-map-img"
+                  src={mapSrc}
+                  alt={t("winery.mapImageAlt")}
+                  decoding="async"
+                  draggable={false}
+                />
+                {hotspots.map((h) => (
+                  <button
+                    key={h.wineryId}
+                    type="button"
+                    className="visitor-map-marker"
+                    style={{
+                      left: `${h.xPercent}%`,
+                      top: `${h.yPercent}%`,
+                      transform: `translate(-50%, -50%) scale(${markerScale})`,
+                    }}
+                    aria-label={t("winery.mapMarkerAria")}
+                    onClick={() => navigate(h.wineryId)}
+                  >
+                    <span className="visitor-map-marker-dot">{markerLabel(h)}</span>
+                  </button>
+                ))}
+              </div>
+            </TransformComponent>
+          );
+        }}
       </TransformWrapper>
     </div>
   );

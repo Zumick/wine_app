@@ -1,4 +1,4 @@
-import type { MouseEvent, TransitionEvent } from "react";
+import type { MouseEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WineActionToggles } from "../components/WineActionToggles";
@@ -16,8 +16,7 @@ import {
 import { wineHasExpandableDetail, wineSecondaryLine } from "../lib/wineDisplay";
 import type { EventCatalog, Wine, Winery } from "../types";
 
-const PENDING_REMOVE_SECONDS = 5;
-const PENDING_REMOVE_MS = PENDING_REMOVE_SECONDS * 1000;
+const UNDO_SECONDS = 5;
 type MyWinesViewMode = "flat" | "grouped";
 
 function sortedWineries(catalog: EventCatalog): Winery[] {
@@ -36,9 +35,10 @@ type WineShortlistRowProps = {
   expandedWineryName?: string;
   cellarNumber?: string;
   showCellarInline?: boolean;
-  onRemovalExitComplete: (
-    wineId: string,
+  onRemove: (
+    wine: Wine,
     previousLevel: Exclude<WineStarLevel, 0>,
+    cellarNumber?: string,
   ) => void;
 };
 
@@ -47,15 +47,9 @@ function WineShortlistRow({
   expandedWineryName,
   cellarNumber,
   showCellarInline = false,
-  onRemovalExitComplete,
+  onRemove,
 }: WineShortlistRowProps) {
   const [open, setOpen] = useState(false);
-  const [pendingRemove, setPendingRemove] = useState(false);
-  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
-  const [exiting, setExiting] = useState(false);
-  const removalLevelRef = useRef<Exclude<WineStarLevel, 0>>(2);
-  const pendingTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pendingFinishRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const line2 = wineSecondaryLine(wine);
   const hasDescription = Boolean(wine.description?.trim());
   const hasDetail = wineHasExpandableDetail(wine) || Boolean(expandedWineryName);
@@ -63,108 +57,34 @@ function WineShortlistRow({
   const level = getStarLevel(wine.id);
   const isTop = level === 2;
 
-  const clearPendingTimers = useCallback(() => {
-    if (pendingTickRef.current !== null) {
-      clearInterval(pendingTickRef.current);
-      pendingTickRef.current = null;
-    }
-    if (pendingFinishRef.current !== null) {
-      clearTimeout(pendingFinishRef.current);
-      pendingFinishRef.current = null;
-    }
-  }, []);
-
-  const cancelPendingRemoval = useCallback(() => {
-    clearPendingTimers();
-    setPendingRemove(false);
-    setRemainingSeconds(null);
-  }, [clearPendingTimers]);
-
-  const startPendingRemoval = useCallback(() => {
-    clearPendingTimers();
-    setPendingRemove(true);
-    setRemainingSeconds(PENDING_REMOVE_SECONDS);
-
-    pendingTickRef.current = setInterval(() => {
-      setRemainingSeconds((prev) => {
-        if (prev === null) return null;
-        return prev > 1 ? prev - 1 : 1;
-      });
-    }, 1000);
-
-    pendingFinishRef.current = setTimeout(() => {
-      clearPendingTimers();
-      setPendingRemove(false);
-      setRemainingSeconds(null);
-      setExiting(true);
-    }, PENDING_REMOVE_MS);
-  }, [clearPendingTimers]);
-
-  useEffect(() => {
-    if (!pendingRemove) return;
-    if (level < 1) {
-      cancelPendingRemoval();
-    }
-  }, [pendingRemove, level, cancelPendingRemoval]);
-
-  useEffect(() => () => clearPendingTimers(), [clearPendingTimers]);
-
   const toggleRow = () => {
-    if (hasDetail && !exiting && !pendingRemove) setOpen((v) => !v);
+    if (hasDetail) setOpen((v) => !v);
   };
 
   const handleStarClick = (_e: MouseEvent<HTMLButtonElement>) => {
-    if (exiting) return;
-    if (pendingRemove) {
-      cancelPendingRemoval();
-      return;
-    }
     cycleStarRating(wine.id);
-  };
-
-  const handleStarLongPress = () => {
-    if (exiting || pendingRemove) return;
-    if (level < 1) return;
-    removalLevelRef.current = level as Exclude<WineStarLevel, 0>;
-    startPendingRemoval();
-  };
-
-  const handleTransitionEnd = (e: TransitionEvent<HTMLLIElement>) => {
-    if (e.target !== e.currentTarget) return;
-    if (!exiting) return;
-    if (e.propertyName !== "opacity") return;
-    onRemovalExitComplete(wine.id, removalLevelRef.current);
   };
 
   return (
     <li
-      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}${isTop ? " visitor-wine-card--top-pick" : ""}${pendingRemove ? " visitor-wine-card--mywines-pending" : ""}${exiting ? " visitor-wine-card--mywines-exiting" : ""}`}
+      className={`visitor-wine-card${hasDetail ? " visitor-wine-card--expandable" : ""}${isTop ? " visitor-wine-card--top-pick" : ""}`}
       style={{ listStyle: "none" }}
       onClick={toggleRow}
-      onTransitionEnd={handleTransitionEnd}
       onKeyDown={(e) => {
-        if (!hasDetail || exiting || pendingRemove) return;
+        if (!hasDetail) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           setOpen((v) => !v);
         }
       }}
       role={hasDetail ? "button" : undefined}
-      tabIndex={hasDetail && !exiting && !pendingRemove ? 0 : undefined}
+      tabIndex={hasDetail ? 0 : undefined}
       aria-expanded={hasDetail ? open : undefined}
     >
       <WineActionToggles
         wineId={wine.id}
-        expandChevron={hasDetail && !exiting && !pendingRemove ? { open } : undefined}
+        expandChevron={hasDetail ? { open } : undefined}
         onStarClick={handleStarClick}
-        onStarLongPress={handleStarLongPress}
-        starAriaLabel={
-          pendingRemove
-            ? t("myWines.cancelRemovalAria")
-            : level >= 1
-              ? t("myWines.topLongPressAria")
-              : undefined
-        }
       >
         <span className="visitor-wine-label-row">
           <span className="visitor-wine-label">{wine.label}</span>
@@ -175,27 +95,7 @@ function WineShortlistRow({
           ) : null}
         </span>
       </WineActionToggles>
-      {pendingRemove ? (
-        <div className="visitor-wine-removal-pending" role="status" aria-live="polite">
-          <span className="visitor-wine-removal-countdown">
-            {t("myWines.removalCountdown").replace(
-              "{seconds}",
-              String(remainingSeconds ?? PENDING_REMOVE_SECONDS),
-            )}
-          </span>
-          <button
-            type="button"
-            className="visitor-wine-removal-cancel"
-            onClick={(e) => {
-              e.stopPropagation();
-              cancelPendingRemoval();
-            }}
-          >
-            {t("myWines.cancelRemoval")}
-          </button>
-        </div>
-      ) : null}
-      {open && hasDetail && !exiting && !pendingRemove ? (
+      {open && hasDetail ? (
         <div className="visitor-wine-extra-wrap">
           {expandedWineryName ? (
             <div className="visitor-wine-line2 visitor-wine-line2--winery">
@@ -213,13 +113,33 @@ function WineShortlistRow({
           {hasDescription ? (
             <p className="visitor-wine-extra-note">{wine.description?.trim()}</p>
           ) : null}
+          {level >= 1 ? (
+            <div className="visitor-wine-detail-actions">
+              <button
+                type="button"
+                className="visitor-wine-remove-btn"
+                aria-label="Odebrat víno"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(wine, level as Exclude<WineStarLevel, 0>, cellarNumber);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </li>
   );
 }
 
-type UndoPayload = { wineId: string; previousLevel: Exclude<WineStarLevel, 0> };
+type UndoPayload = {
+  wineId: string;
+  previousLevel: Exclude<WineStarLevel, 0>;
+  wineLabel: string;
+  cellarNumber?: string;
+};
 type StarredWineRow = { wine: Wine; level: WineStarLevel; winery: Winery | undefined };
 
 function printableVintage(vintage: string): string {
@@ -275,8 +195,10 @@ export function MyWinesPage() {
   const { getRecord, setStarLevel } = useVisitorActions();
   const [viewMode, setViewMode] = useState<MyWinesViewMode>("flat");
   const [undoToast, setUndoToast] = useState<UndoPayload | null>(null);
+  const [undoSecondsLeft, setUndoSecondsLeft] = useState<number>(UNDO_SECONDS);
   const [copiedToast, setCopiedToast] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const copiedToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loggedOpenRef = useRef<string | null>(null);
 
@@ -284,6 +206,10 @@ export function MyWinesPage() {
     if (toastTimerRef.current !== null) {
       clearTimeout(toastTimerRef.current);
       toastTimerRef.current = null;
+    }
+    if (toastTickRef.current !== null) {
+      clearInterval(toastTickRef.current);
+      toastTickRef.current = null;
     }
   }, []);
 
@@ -312,10 +238,19 @@ export function MyWinesPage() {
     (payload: UndoPayload) => {
       clearToastTimer();
       setUndoToast(payload);
+      setUndoSecondsLeft(UNDO_SECONDS);
+      toastTickRef.current = setInterval(() => {
+        setUndoSecondsLeft((prev) => (prev > 1 ? prev - 1 : 1));
+      }, 1000);
       toastTimerRef.current = setTimeout(() => {
         setUndoToast(null);
+        setUndoSecondsLeft(UNDO_SECONDS);
+        if (toastTickRef.current !== null) {
+          clearInterval(toastTickRef.current);
+          toastTickRef.current = null;
+        }
         toastTimerRef.current = null;
-      }, 2500);
+      }, UNDO_SECONDS * 1000);
     },
     [clearToastTimer],
   );
@@ -323,6 +258,7 @@ export function MyWinesPage() {
   const dismissToast = useCallback(() => {
     clearToastTimer();
     setUndoToast(null);
+    setUndoSecondsLeft(UNDO_SECONDS);
   }, [clearToastTimer]);
 
   const handleUndo = useCallback(() => {
@@ -331,10 +267,19 @@ export function MyWinesPage() {
     dismissToast();
   }, [undoToast, setStarLevel, dismissToast]);
 
-  const handleRemovalExitComplete = useCallback(
-    (wineId: string, previousLevel: Exclude<WineStarLevel, 0>) => {
-      setStarLevel(wineId, 0);
-      showRemovalToast({ wineId, previousLevel });
+  const handleRemoveWine = useCallback(
+    (
+      wine: Wine,
+      previousLevel: Exclude<WineStarLevel, 0>,
+      cellarNumber?: string,
+    ) => {
+      setStarLevel(wine.id, 0);
+      showRemovalToast({
+        wineId: wine.id,
+        previousLevel,
+        wineLabel: wine.label,
+        cellarNumber: (cellarNumber ?? "").trim() || undefined,
+      });
     },
     [setStarLevel, showRemovalToast],
   );
@@ -482,7 +427,7 @@ export function MyWinesPage() {
               showCellarInline
               cellarNumber={winery?.locationNumber ?? ""}
               expandedWineryName={winery?.name}
-              onRemovalExitComplete={handleRemovalExitComplete}
+              onRemove={handleRemoveWine}
             />
           ))}
         </ul>
@@ -503,7 +448,7 @@ export function MyWinesPage() {
                 <WineShortlistRow
                   key={wine.id}
                   wine={wine}
-                  onRemovalExitComplete={handleRemovalExitComplete}
+                  onRemove={handleRemoveWine}
                 />
               ))}
             </ul>
@@ -517,15 +462,17 @@ export function MyWinesPage() {
           role="status"
           aria-live="polite"
         >
-          <span className="visitor-mywines-toast-text">
-            {t("myWines.removedToast")}
-          </span>
-          <button
-            type="button"
-            className="visitor-mywines-toast-undo"
-            onClick={handleUndo}
-          >
-            {t("myWines.undo")}
+          <div className="visitor-mywines-toast-text">
+            <div>
+              Odebráno: {undoToast.wineLabel}
+              {undoToast.cellarNumber
+                ? ` · sklep ${undoToast.cellarNumber}`
+                : ""}
+            </div>
+            <div className="visitor-mywines-toast-meta">{undoSecondsLeft}s</div>
+          </div>
+          <button type="button" className="visitor-mywines-toast-undo" onClick={handleUndo}>
+            Zpět
           </button>
         </div>
       ) : null}
