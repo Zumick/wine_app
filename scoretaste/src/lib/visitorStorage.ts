@@ -248,6 +248,25 @@ export function saveVisitorActions(blob: VisitorActionsBlob): void {
   schedulePushVisitorSync(blob.eventId, toStore);
 }
 
+export function logVisitorEvent(
+  eventId: string,
+  actionType: "open_my_wines" | "open_winery_list",
+  epochScope: VisitorEpochScope,
+): void {
+  const sessionKey = getOrCreateVisitorSessionKey();
+  const payload: Record<string, unknown> = { sessionKey, actionType };
+  if (epochScope !== null) {
+    payload.epochId = epochScope;
+  }
+  void fetch(`/guide/data/events/${encodeURIComponent(eventId)}/visitor-event`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {
+    /* no-op */
+  });
+}
+
 function getOrCreate(
   actions: Record<string, VisitorWineActionRecord>,
   wineId: string,

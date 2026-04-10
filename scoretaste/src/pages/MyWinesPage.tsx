@@ -8,13 +8,13 @@ import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import {
+  logVisitorEvent,
   wineIdsWithValidWinery,
   wineStarLevel,
   type WineStarLevel,
 } from "../lib/visitorStorage";
 import { wineHasExpandableDetail, wineSecondaryLine } from "../lib/wineDisplay";
 import type { EventCatalog, Wine, Winery } from "../types";
-import iconShare from "../assets/icon-share.png";
 
 const PENDING_REMOVE_SECONDS = 5;
 const PENDING_REMOVE_MS = PENDING_REMOVE_SECONDS * 1000;
@@ -278,6 +278,7 @@ export function MyWinesPage() {
   const [copiedToast, setCopiedToast] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loggedOpenRef = useRef<string | null>(null);
 
   const clearToastTimer = useCallback(() => {
     if (toastTimerRef.current !== null) {
@@ -296,6 +297,16 @@ export function MyWinesPage() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!eventId) return;
+    if (catalogState.status !== "ok") return;
+    const epochScope = catalogState.catalog.event.activeEpochId ?? null;
+    const key = `${eventId}:${epochScope === null ? "none" : String(epochScope)}`;
+    if (loggedOpenRef.current === key) return;
+    loggedOpenRef.current = key;
+    logVisitorEvent(eventId, "open_my_wines", epochScope);
+  }, [catalogState, eventId]);
 
   const showRemovalToast = useCallback(
     (payload: UndoPayload) => {
@@ -448,16 +459,9 @@ export function MyWinesPage() {
             onClick={handleShareList}
             disabled={starredRows.length === 0}
           >
-            <img
-              src={iconShare}
-              alt=""
-              className="visitor-mywines-share-icon"
-              width={22}
-              height={22}
-              decoding="async"
-              draggable={false}
-              aria-hidden={true}
-            />
+            <span className="visitor-mywines-share-icon" aria-hidden={true}>
+              ↗
+            </span>
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Link, useParams } from "react-router-dom";
 import { EventWineryMapView } from "../components/EventWineryMapView";
 import { ErrorBlock, LoadingBlock, PageMain } from "../components/LoadState";
@@ -10,6 +10,7 @@ import {
 } from "../hooks/useSessionEventCatalog";
 import { hasEventMapImage } from "../lib/eventMapAsset";
 import { catalogErrorTitle } from "../lib/errorCopy";
+import { logVisitorEvent } from "../lib/visitorStorage";
 import { t } from "../i18n";
 import type { EventCatalog, Winery } from "../types";
 
@@ -39,6 +40,7 @@ export function WineryListPage() {
   const [wineryFilter] = useWineryListFilter();
   const [browseView, setBrowseView] = useWineryBrowseView();
   const { isWineryVisited, toggleWineryVisited } = useVisitorActions();
+  const loggedOpenRef = useRef<string | null>(null);
 
   const hasMap = Boolean(eventId && hasEventMapImage(eventId));
 
@@ -47,6 +49,16 @@ export function WineryListPage() {
       setBrowseView("list");
     }
   }, [hasMap, browseView, setBrowseView]);
+
+  useEffect(() => {
+    if (!eventId) return;
+    if (state.status !== "ok") return;
+    const epochScope = state.catalog.event.activeEpochId ?? null;
+    const key = `${eventId}:${epochScope === null ? "none" : String(epochScope)}`;
+    if (loggedOpenRef.current === key) return;
+    loggedOpenRef.current = key;
+    logVisitorEvent(eventId, "open_winery_list", epochScope);
+  }, [state, eventId]);
 
   if (!eventId) {
     return <ErrorBlock title={catalogErrorTitle("MISSING_EVENT_ID")} />;

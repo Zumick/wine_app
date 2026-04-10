@@ -4,6 +4,7 @@ import { EventSessionLayout } from "./layout/EventSessionLayout";
 import { ContributorPage } from "./pages/ContributorPage";
 import { EventEntryPage } from "./pages/EventEntryPage";
 import { MapEditorPage } from "./pages/MapEditorPage";
+import { PilotMonitorPage } from "./pages/PilotMonitorPage";
 import { MyWinesPage } from "./pages/MyWinesPage";
 import { WineryDetailPage } from "./pages/WineryDetailPage";
 import { WineryListPage } from "./pages/WineryListPage";
@@ -22,6 +23,7 @@ export function AppRoutes() {
     <Routes>
       <Route path="/" element={<GuideRootPlaceholder />} />
       <Route path="e/:eventId/map-editor" element={<MapEditorPage />} />
+      <Route path="e/:eventId/monitor" element={<PilotMonitorPage />} />
       <Route path="e/:eventId" element={<EventSessionLayout />}>
         <Route index element={<EventEntryPage />} />
         <Route path="wineries" element={<WineryListPage />} />

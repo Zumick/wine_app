@@ -513,14 +513,14 @@ ul {
   cursor: pointer;
   font-size: var(--wine-chevron-size);
   line-height: 1;
-  color: var(--color-text-soft);
-  opacity: var(--chevron-opacity);
+  color: var(--color-text-muted);
+  opacity: 0.62;
   transition: transform 0.15s ease, opacity 0.15s ease;
 }
 
 .visitor-winery-head-chevron-open {
   transform: rotate(-180deg);
-  opacity: calc(var(--chevron-opacity) * 1.4);
+  opacity: 0.9;
 }
 
 .visitor-winery-page-head {
@@ -632,13 +632,14 @@ ul {
 }
 
 .visitor-mywines-share-icon {
-  width: 22px;
-  height: 22px;
-  max-width: 22px;
-  max-height: 22px;
-  display: block;
-  object-fit: contain;
-  flex-shrink: 0;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  line-height: 1;
+  font-size: 1.25rem;
+  font-weight: var(--font-weight-semibold);
+  transform: translateY(-1px);
+  user-select: none;
 }
 
 .visitor-mywines-share-btn:disabled {
@@ -884,11 +885,18 @@ ul {
   border-bottom: none;
 }
 
-/* TOP: bez barvy řádku — důraz jen na hvězdě */
+/* TOP: jemné zlaté podbarvení bez zvětšování prvků */
 .visitor-wine-card--top-pick {
-  background: transparent;
-  border-radius: 0;
-  border-bottom-color: var(--color-border-soft);
+  background: linear-gradient(
+    90deg,
+    rgba(232, 199, 106, 0.128) 0%,
+    rgba(232, 199, 106, 0.072) 45%,
+    rgba(232, 199, 106, 0.032) 100%
+  );
+  border: 1px solid rgba(209, 138, 0, 0.16);
+  border-radius: var(--radius-sm);
+  padding-left: var(--space-1);
+  padding-right: var(--space-1);
 }
 
 .visitor-wine-label {
@@ -992,8 +1000,8 @@ ul {
   height: var(--wine-chevron-size);
   font-size: var(--wine-chevron-size);
   line-height: 1;
-  color: var(--color-text-soft);
-  opacity: var(--chevron-opacity);
+  color: var(--color-text-muted);
+  opacity: 0.62;
   transform: rotate(0deg);
   transition: transform 0.15s ease, opacity 0.15s ease;
   user-select: none;
@@ -1001,7 +1009,7 @@ ul {
 }
 
 .visitor-wine-detail-chevron-open {
-  opacity: calc(var(--chevron-opacity) * 1.35);
+  opacity: 0.9;
   transform: rotate(-180deg);
 }
 
@@ -1074,4 +1082,260 @@ ul {
   font-weight: var(--font-weight-semibold);
   line-height: 1.2;
   color: var(--color-text);
+}
+
+/* Interní odkaz — Pilot monitor (jen při VITE_PILOT_MONITOR) */
+.visitor-pilot-foot {
+  padding: var(--space-2) var(--page-padding-x) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  text-align: center;
+}
+
+.visitor-pilot-link {
+  font-size: 0.75rem;
+  color: var(--color-text-soft);
+  text-decoration: none;
+}
+
+.visitor-pilot-link:active {
+  color: var(--color-text-muted);
+}
+
+/* Pilot Monitor — mobilní přehled */
+.pilot-monitor {
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: var(--space-3) var(--page-padding-x) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  min-height: 100dvh;
+  box-sizing: border-box;
+}
+
+.pilot-monitor-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.pilot-monitor-back {
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.pilot-monitor-refresh {
+  font-size: var(--font-size-meta);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.pilot-monitor-muted {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-meta);
+}
+
+.pilot-monitor-err {
+  margin: 0 0 var(--space-2);
+  color: #b45309;
+  font-size: var(--font-size-meta);
+}
+
+.pilot-monitor-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.pilot-monitor-status-title {
+  font-weight: var(--font-weight-semibold);
+  font-size: 1rem;
+  line-height: 1.25;
+  margin-bottom: var(--space-1);
+}
+
+.pilot-monitor-mode {
+  font-size: var(--font-size-meta);
+  color: var(--color-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.pilot-monitor-meta {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+}
+
+.pilot-monitor-kpis {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+}
+
+.pilot-monitor-kpi {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 94px;
+}
+
+.pilot-monitor-kpi-sub {
+  font-size: 0.72rem;
+  color: var(--color-text-soft);
+}
+
+.pilot-monitor-kpi-val {
+  font-size: 1.25rem;
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.pilot-monitor-kpi-lbl {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+}
+
+.pilot-monitor-section {
+  margin-top: var(--space-4);
+}
+
+.pilot-monitor-h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.pilot-monitor-kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pilot-monitor-kpi-info-btn {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+}
+
+.pilot-monitor-kpi-help {
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-sm);
+  background: #fcfcfd;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.pilot-monitor-kpi-help p {
+  margin: 0 0 var(--space-2);
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  line-height: 1.35;
+}
+
+.pilot-monitor-kpi-help p:last-child {
+  margin-bottom: 0;
+}
+
+.pilot-monitor-kpi-main {
+  background: var(--color-primary-soft);
+  border: 1px solid #dce5ff;
+  min-height: 94px;
+}
+
+.pilot-monitor-kpi-main-val {
+  font-size: 1.5rem;
+  font-weight: var(--font-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: #1f3f99;
+}
+
+.pilot-monitor-kpi-main-lbl {
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-medium);
+}
+
+.pilot-monitor-kpi-main-sub {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+
+.pilot-monitor-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.pilot-monitor-log-row {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 4.5rem) minmax(0, 5rem) 1fr;
+  gap: var(--space-1);
+  align-items: baseline;
+  padding: var(--space-2) var(--space-2);
+  font-size: 0.8125rem;
+  border-bottom: 1px solid var(--color-border-soft);
+}
+
+.pilot-monitor-log-row:last-child {
+  border-bottom: none;
+}
+
+.pilot-monitor-log-t {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.pilot-monitor-log-d {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pilot-monitor-log-a {
+  font-size: 0.75rem;
+  color: var(--color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pilot-monitor-log-w {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pilot-monitor-errors .pilot-monitor-err-msg {
+  margin: 0;
+  font-size: var(--font-size-meta);
+  color: var(--color-text-muted);
+}
+
+.pilot-monitor-refresh-hint {
+  margin: var(--space-1) 0 0;
+  font-size: 0.7rem;
 }

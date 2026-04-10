@@ -864,7 +864,7 @@ def _ensure_scoretaste_visitor_selection_event_log_table(conn):
             event_id INTEGER NOT NULL,
             epoch_id INTEGER,
             device_id TEXT NOT NULL,
-            wine_id INTEGER NOT NULL,
+            wine_id INTEGER,
             previous_state TEXT,
             new_state TEXT,
             action_type TEXT NOT NULL,
@@ -875,6 +875,74 @@ def _ensure_scoretaste_visitor_selection_event_log_table(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS scoretaste_sel_log_event_epoch
+        ON scoretaste_visitor_selection_event_log(event_id, epoch_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS scoretaste_sel_log_created
+        ON scoretaste_visitor_selection_event_log(created_at)
+        """
+    )
+
+
+def _migrate_scoretaste_selection_event_log_allow_null_wine_id(conn):
+    """Umožní wine_id=NULL pro nesoutěžní akce (např. open_my_wines)."""
+    rows = conn.execute(
+        "PRAGMA table_info(scoretaste_visitor_selection_event_log)"
+    ).fetchall()
+    if not rows:
+        return
+    wine_col = None
+    for r in rows:
+        if str(r[1]) == "wine_id":
+            wine_col = r
+            break
+    if not wine_col:
+        return
+    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+    wine_notnull = int(wine_col[3] or 0)
+    if wine_notnull == 0:
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE _st_sel_log_mig_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                epoch_id INTEGER,
+                device_id TEXT NOT NULL,
+                wine_id INTEGER,
+                previous_state TEXT,
+                new_state TEXT,
+                action_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE,
+                FOREIGN KEY (epoch_id) REFERENCES scoretaste_event_collection_epoch(id) ON DELETE SET NULL,
+                FOREIGN KEY (wine_id) REFERENCES scoretaste_wines(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO _st_sel_log_mig_new
+            (id, event_id, epoch_id, device_id, wine_id, previous_state, new_state, action_type, created_at)
+            SELECT id, event_id, epoch_id, device_id, wine_id, previous_state, new_state, action_type, created_at
+            FROM scoretaste_visitor_selection_event_log
+            """
+        )
+        conn.execute("DROP TABLE scoretaste_visitor_selection_event_log")
+        conn.execute(
+            "ALTER TABLE _st_sel_log_mig_new RENAME TO scoretaste_visitor_selection_event_log"
+        )
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS scoretaste_sel_log_event_epoch
@@ -1316,6 +1384,7 @@ def init_db():
     _migrate_scoretaste_visitor_wine_flag_for_epochs(conn)
 
     _ensure_scoretaste_visitor_selection_event_log_table(conn)
+    _migrate_scoretaste_selection_event_log_allow_null_wine_id(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scoretaste_event_map_hotspots (
@@ -2115,11 +2184,18 @@ def _html_deg_list_section(
         if include_pruvodce_delete:
             eid = int(d["id"])
             admin_href = url_for("guide_admin_catalog", event_id=eid)
+            monitor_href = f"{URL_GUIDE_APP_PREFIX}/e/{eid}/monitor"
+            monitor_link = ""
+            if _env_truthy("WINEAPP_PILOT_MONITOR", False):
+                monitor_link = (
+                    f' <a class="guide-admin-cat-link" href="{escape(monitor_href)}">'
+                    "Pilot monitor</a>"
+                )
             parts.append(
                 f"""
         <div class="deg-row-guide">
             {vyber}
-            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>
+            <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>{monitor_link}
             <form method="post" action="{escape(post_url)}" class="deg-del-form">
                 <input type="hidden" name="action" value="smazat">
                 <input type="hidden" name="degustace_id" value="{eid}">
@@ -2884,6 +2960,204 @@ def _format_live_started_cz(iso_raw):
         return dt.strftime("%d.%m.%Y %H:%M")
     except ValueError:
         return s
+
+
+def _pilot_monitor_device_short(device_id):
+    s = (device_id or "").strip()
+    if len(s) <= 10:
+        return s
+    return s[:8] + "…"
+
+
+def _pilot_monitor_payload_for_event(conn, event_id):
+    """Read-only payload pro Pilot Monitor (interní). Vrací None pokud akce neexistuje / není průvodce."""
+    eid = int(event_id)
+    deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+    if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+        return None
+    _maybe_migrate_json_to_db(conn, eid)
+    _ensure_scoretaste_visitor_selection_event_log_table(conn)
+    _migrate_scoretaste_visitor_wine_flag_for_epochs(conn)
+
+    event_title = (deg["nazev"] or "").strip() or f"Akce {eid}"
+    active = get_active_collection_epoch(conn, eid)
+
+    if active:
+        mode = "live"
+        started_at_raw = active["started_at"]
+        epoch_number = int(active["epoch_number"] or 0)
+        started_display = _format_live_started_cz(started_at_raw)
+    else:
+        mode = "preparation"
+        started_at_raw = None
+        epoch_number = None
+        started_display = None
+
+    kpi_row = conn.execute(
+        """
+        SELECT
+          COALESCE(COUNT(DISTINCT f.session_key), 0) AS active_devices,
+          COALESCE(
+            COUNT(DISTINCT CASE WHEN (f.liked = 1 OR f.want_to_buy = 1) THEN f.session_key END),
+            0
+          ) AS devices_with_marks,
+          COALESCE(SUM(CASE WHEN f.liked = 1 AND f.want_to_buy = 0 THEN 1 ELSE 0 END), 0) AS favorites,
+          COALESCE(SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END), 0) AS top
+        FROM scoretaste_visitor_wine_flag f
+        WHERE f.event_id = ?
+        AND f.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = ? AND e.is_active = 1
+        )
+        """,
+        (eid, eid),
+    ).fetchone()
+
+    kpis = {
+        "activeDevices": int(kpi_row["active_devices"] or 0),
+        "devicesWithSelection": int(kpi_row["devices_with_marks"] or 0),
+        "totalFavorites": int(kpi_row["favorites"] or 0),
+        "totalTop": int(kpi_row["top"] or 0),
+    }
+    qualified_return_row = conn.execute(
+        """
+        WITH active_epoch AS (
+          SELECT id
+          FROM scoretaste_event_collection_epoch
+          WHERE event_id = ? AND is_active = 1
+          LIMIT 1
+        ),
+        qualified_devices AS (
+          SELECT
+            l.device_id,
+            MIN(l.created_at) AS first_selection_at,
+            COUNT(*) AS selection_actions
+          FROM scoretaste_visitor_selection_event_log l
+          JOIN active_epoch ae ON ae.id = l.epoch_id
+          WHERE l.event_id = ?
+            AND l.action_type IN ('set_favorite', 'set_top')
+          GROUP BY l.device_id
+          HAVING COUNT(*) >= 2
+        )
+        SELECT
+          (SELECT COUNT(*) FROM qualified_devices) AS denominator,
+          (
+            SELECT COUNT(*)
+            FROM qualified_devices s
+            WHERE EXISTS (
+              SELECT 1
+              FROM scoretaste_visitor_selection_event_log o
+              JOIN active_epoch ae2 ON ae2.id = o.epoch_id
+              WHERE o.event_id = ?
+                AND o.device_id = s.device_id
+                AND o.action_type = 'open_my_wines'
+                AND o.created_at > s.first_selection_at
+            )
+          ) AS numerator
+        """,
+        (eid, eid, eid),
+    ).fetchone()
+    qualified_return_num = int(qualified_return_row["numerator"] or 0)
+    qualified_return_den = int(qualified_return_row["denominator"] or 0)
+    kpis["qualifiedReturnRate"] = {
+        "value": round((qualified_return_num / qualified_return_den) * 100.0, 1)
+        if qualified_return_den > 0
+        else None,
+        "numerator": qualified_return_num,
+        "denominator": qualified_return_den,
+    }
+
+    ready_row = conn.execute(
+        """
+        WITH active_epoch AS (
+          SELECT id
+          FROM scoretaste_event_collection_epoch
+          WHERE event_id = ? AND is_active = 1
+          LIMIT 1
+        ),
+        per_device AS (
+          SELECT
+            f.session_key AS device_id,
+            SUM(CASE WHEN (f.liked = 1 OR f.want_to_buy = 1) THEN 1 ELSE 0 END) AS selected_count,
+            SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END) AS top_count
+          FROM scoretaste_visitor_wine_flag f
+          JOIN active_epoch ae ON ae.id = f.epoch_id
+          WHERE f.event_id = ?
+          GROUP BY f.session_key
+        )
+        SELECT
+          COALESCE(SUM(CASE WHEN selected_count >= 1 THEN 1 ELSE 0 END), 0) AS denominator,
+          COALESCE(SUM(CASE WHEN selected_count >= 3 AND top_count >= 1 THEN 1 ELSE 0 END), 0) AS numerator
+        FROM per_device
+        """,
+        (eid, eid),
+    ).fetchone()
+    ready_num = int(ready_row["numerator"] or 0)
+    ready_den = int(ready_row["denominator"] or 0)
+    kpis["readyToBuyRate"] = {
+        "value": round((ready_num / ready_den) * 100.0, 1) if ready_den > 0 else None,
+        "numerator": ready_num,
+        "denominator": ready_den,
+    }
+
+    log_rows = conn.execute(
+        """
+        SELECT l.created_at, l.device_id, l.action_type, w.label,
+               COALESCE(NULLIF(TRIM(y.location_number), ''), '') AS cellar
+        FROM scoretaste_visitor_selection_event_log l
+        LEFT JOIN scoretaste_wines w ON w.id = l.wine_id
+        LEFT JOIN scoretaste_wineries y ON w.winery_id = y.id AND y.event_id = l.event_id
+        WHERE l.event_id = ?
+        AND l.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = ? AND e.is_active = 1
+        )
+        ORDER BY l.id DESC
+        LIMIT 40
+        """,
+        (eid, eid),
+    ).fetchall()
+
+    recent = []
+    for r in log_rows:
+        cellar = (r["cellar"] or "").strip()
+        action_type = (r["action_type"] or "").strip()
+        wine_label = (r["label"] or "").strip()
+        if not wine_label and action_type == "open_my_wines":
+            wine_label = "Moje vína"
+        if not wine_label:
+            wine_label = "—"
+        recent.append(
+            {
+                "time": r["created_at"],
+                "deviceShort": _pilot_monitor_device_short(r["device_id"]),
+                "actionType": action_type,
+                "wineLabel": wine_label,
+                "cellar": cellar or None,
+            }
+        )
+
+    return {
+        "event": {
+            "id": str(eid),
+            "title": event_title,
+            "mode": mode,
+            "startedAt": started_at_raw,
+            "startedDisplay": started_display,
+            "epochNumber": epoch_number,
+        },
+        "kpis": kpis,
+        "recentActivity": recent,
+        "errors": {
+            "message": "Chyby zatím nejsou k dispozici.",
+            "epochMismatchCount": None,
+            "syncErrorCount": None,
+        },
+        "marketingSummary": {
+            "purchaseShortlistRateLabel": "Vytvořený výběr pro nákup",
+            "purchaseShortlistRateValue": kpis["readyToBuyRate"]["value"],
+        },
+    }
 
 
 def _admin_winery_status_badges_html(wy, wine_count):
@@ -3823,6 +4097,25 @@ def guide_event_data(event_id):
     )
 
 
+@app.route("/guide/data/events/<int:event_id>/pilot-monitor.json")
+def guide_event_pilot_monitor(event_id):
+    """Interní přehled pro pilot — zapnuto env WINEAPP_PILOT_MONITOR."""
+    if not _env_truthy("WINEAPP_PILOT_MONITOR", False):
+        abort(404)
+    eid = int(event_id)
+    conn = get_connection()
+    try:
+        payload = _pilot_monitor_payload_for_event(conn, eid)
+        if payload is None:
+            abort(404)
+        conn.commit()
+    finally:
+        conn.close()
+    out = {"ok": True}
+    out.update(payload)
+    return jsonify(out)
+
+
 @app.route("/guide/data/events/<int:event_id>/map-hotspots", methods=["PUT"])
 def guide_event_map_hotspots_put(event_id):
     """Uložení pozic hotspotů na mapě akce (admin; stejný přístup jako správa katalogu)."""
@@ -4014,6 +4307,42 @@ def guide_visitor_sync(event_id):
                     now,
                 ),
             )
+        conn.commit()
+        return jsonify(ok=True)
+    finally:
+        conn.close()
+
+
+@app.route("/guide/data/events/<int:event_id>/visitor-event", methods=["POST"])
+def guide_visitor_event(event_id):
+    """Lehké logování ne-selekčních akcí návštěvníka (pilot KPI)."""
+    eid = int(event_id)
+    data = request.get_json(silent=True) or {}
+    sk = (data.get("sessionKey") or "").strip()
+    if len(sk) < 8 or len(sk) > 256:
+        return jsonify(ok=False, error="sessionKey"), 400
+    action_type = (data.get("actionType") or "").strip()
+    if action_type not in ("open_my_wines", "open_winery_list"):
+        return jsonify(ok=False, error="actionType"), 400
+    conn = get_connection()
+    try:
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            abort(404)
+        ok, st, code = _validate_visitor_sync_epoch(conn, eid, data)
+        if not ok:
+            return jsonify(ok=False, code=code), st
+        active_epoch = get_active_collection_epoch(conn, eid)
+        epoch_id_val = active_epoch["id"] if active_epoch else None
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        conn.execute(
+            """
+            INSERT INTO scoretaste_visitor_selection_event_log
+            (event_id, epoch_id, device_id, wine_id, previous_state, new_state, action_type, created_at)
+            VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
+            """,
+            (eid, epoch_id_val, sk, action_type, now),
+        )
         conn.commit()
         return jsonify(ok=True)
     finally:
@@ -4353,6 +4682,7 @@ def guide_contributor_catalog(event_id, winery_id):
 @app.route("/guide/e/<event_id>/wineries/<winery_id>")
 @app.route("/guide/e/<event_id>/my")
 @app.route("/guide/e/<event_id>/map-editor")
+@app.route("/guide/e/<event_id>/monitor")
 def guide_scoretaste_app(event_id, winery_id=None):
     return _scoretaste_index()
 

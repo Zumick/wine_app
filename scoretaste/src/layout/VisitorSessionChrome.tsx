@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useMatch } from "react-router-dom";
+import { Link, NavLink, Outlet, useMatch } from "react-router-dom";
 import type { EventCatalog } from "../types";
 import { t } from "../i18n";
 import type { VisitorSessionOutletContext } from "./visitorSessionContext";
@@ -49,6 +49,9 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
   });
   const showFilter = Boolean(listMatch) && wineryBrowseView === "list";
   const eventName = catalog.event.name.trim() || t("guide.title");
+  const showPilotMonitor =
+    import.meta.env.VITE_PILOT_MONITOR === "true" ||
+    import.meta.env.VITE_PILOT_MONITOR === "1";
 
   return (
     <div className="visitor-shell">
@@ -170,6 +173,14 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
       <div className="visitor-body">
         <Outlet context={outletContext} />
       </div>
+
+      {showPilotMonitor ? (
+        <div className="visitor-pilot-foot">
+          <Link to={`/e/${eventId}/monitor`} className="visitor-pilot-link">
+            Pilot monitor
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }
