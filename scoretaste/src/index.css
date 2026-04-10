@@ -161,6 +161,25 @@ ul {
   color: var(--color-text-muted);
 }
 
+.visitor-info-btn-highlight {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  animation: visitorInfoPulse 1.2s ease-in-out 2;
+}
+
+@keyframes visitorInfoPulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 .visitor-nav {
   display: flex;
   gap: var(--space-2);
@@ -296,6 +315,76 @@ ul {
   white-space: pre-line;
 }
 
+.visitor-info-p {
+  margin: 0 0 var(--space-2);
+}
+
+.visitor-info-flow {
+  margin: 0 0 var(--space-2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.visitor-info-flow-arrow {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-semibold);
+}
+
+.visitor-info-list {
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.visitor-info-list li {
+  display: grid;
+  grid-template-columns: 2.2rem 1fr;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.visitor-info-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  min-width: 2rem;
+  height: 1.25rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  box-sizing: border-box;
+}
+
+.visitor-info-symbol-star {
+  color: var(--color-star-on);
+}
+
+.visitor-info-symbol-top {
+  position: relative;
+  width: 2rem;
+  height: 2rem;
+  min-width: 2rem;
+  color: var(--color-star-on);
+  font-size: 0.86rem;
+  line-height: 1;
+  z-index: 0;
+}
+
+.visitor-info-symbol-top::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--color-star-top-bg);
+  border: 1px solid var(--color-star-top-ring);
+  z-index: -1;
+}
+
 .visitor-modal-madeby {
   margin: var(--space-3) 0 0;
   text-align: center;
@@ -306,10 +395,18 @@ ul {
 .visitor-modal-madeby a {
   color: var(--color-primary);
   text-decoration: none;
+  display: inline-flex;
+  align-items: center;
 }
 
 .visitor-modal-madeby a:hover {
   text-decoration: underline;
+}
+
+.visitor-madeby-logo {
+  height: 20px;
+  width: auto;
+  display: block;
 }
 
 .visitor-modal-ok {

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useMatch } from "react-router-dom";
 import type { EventCatalog } from "../types";
 import { t } from "../i18n";
 import type { VisitorSessionOutletContext } from "./visitorSessionContext";
+import madeByLogo from "../assets/ScorTaste_cz_logo_info.png";
 
 type Props = {
   eventId: string;
@@ -42,6 +43,8 @@ function VisitorEventLogo({ eventId }: { eventId: string }) {
 
 export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
+  const [infoHighlighted, setInfoHighlighted] = useState(false);
+  const infoHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { wineryFilter, setWineryFilter, wineryBrowseView } = outletContext;
   const listMatch = useMatch({
     path: "/e/:eventId/wineries",
@@ -52,6 +55,47 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
   const showPilotMonitor =
     import.meta.env.VITE_PILOT_MONITOR === "true" ||
     import.meta.env.VITE_PILOT_MONITOR === "1";
+
+  const triggerInfoHighlight = useCallback(() => {
+    setInfoHighlighted(true);
+    if (infoHighlightTimerRef.current !== null) {
+      clearTimeout(infoHighlightTimerRef.current);
+    }
+    infoHighlightTimerRef.current = setTimeout(() => {
+      setInfoHighlighted(false);
+      infoHighlightTimerRef.current = null;
+    }, 3000);
+  }, []);
+
+  const dismissInfoModal = useCallback(() => {
+    setInfoOpen(false);
+    try {
+      localStorage.setItem(`guide_info_seen_event_${eventId}`, "1");
+    } catch {
+      /* ignore storage errors */
+    }
+    triggerInfoHighlight();
+  }, [eventId, triggerInfoHighlight]);
+
+  useEffect(() => {
+    let seen = false;
+    try {
+      seen = localStorage.getItem(`guide_info_seen_event_${eventId}`) === "1";
+    } catch {
+      seen = false;
+    }
+    if (!seen) {
+      setInfoOpen(true);
+    }
+  }, [eventId]);
+
+  useEffect(() => {
+    return () => {
+      if (infoHighlightTimerRef.current !== null) {
+        clearTimeout(infoHighlightTimerRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div className="visitor-shell">
@@ -64,7 +108,7 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
           </div>
           <button
             type="button"
-            className="visitor-info-btn"
+            className={`visitor-info-btn${infoHighlighted ? " visitor-info-btn-highlight" : ""}`}
             onClick={() => setInfoOpen(true)}
             aria-haspopup="dialog"
             aria-expanded={infoOpen}
@@ -124,7 +168,7 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
         <div
           className="visitor-modal-backdrop"
           role="presentation"
-          onClick={() => setInfoOpen(false)}
+          onClick={dismissInfoModal}
         >
           <div
             className="visitor-modal"
@@ -135,34 +179,90 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
           >
             <div className="visitor-modal-head">
               <h2 id="visitor-info-title" className="visitor-modal-title">
-                {t("visitor.infoTitle")}
+                Průvodce degustací
               </h2>
               <button
                 type="button"
                 className="visitor-modal-close"
-                onClick={() => setInfoOpen(false)}
+                onClick={dismissInfoModal}
                 aria-label={t("visitor.modalCloseAria")}
               >
                 ×
               </button>
             </div>
             <div className="visitor-modal-body">
-              <div className="visitor-modal-body-main">{t("visitor.infoBody")}</div>
+              <div className="visitor-modal-body-main">
+                <p className="visitor-info-flow" aria-label="Postup použití průvodce">
+                  Vyber vinařství → vyber víno → lajkuj
+                </p>
+                <ul className="visitor-info-list" aria-label="Vysvětlení symbolů">
+                  <li>
+                    <span className="visitor-info-symbol" aria-hidden={true}>
+                      ✓
+                    </span>
+                    navštívený sklep, automaticky po lajku
+                  </li>
+                  <li>
+                    <span className="visitor-info-symbol visitor-info-symbol-star" aria-hidden={true}>
+                      ★
+                    </span>
+                    oblíbené víno
+                  </li>
+                  <li>
+                    <span className="visitor-info-symbol visitor-info-symbol-top" aria-hidden={true}>
+                      ★
+                    </span>
+                    označení top vína - kupuju
+                  </li>
+                </ul>
+                <ul className="visitor-info-list" aria-label="Sdílení seznamu vín">
+                  <li>
+                    <span className="visitor-info-symbol" aria-hidden={true}>
+                      ↗
+                    </span>
+                    Seznam vín můžete sdílet.
+                  </li>
+                </ul>
+                <p className="visitor-info-p">V Moje vína je seznam označených vzorků</p>
+                <ul className="visitor-info-list" aria-label="Vysvětlení symbolů v Moje vína">
+                  <li>
+                    <span className="visitor-info-symbol" aria-hidden={true}>
+                      ▾
+                    </span>
+                    zobrazí detail vína
+                  </li>
+                  <li>
+                    <span className="visitor-info-symbol" aria-hidden={true}>
+                      ×
+                    </span>
+                    odstranění z moje vína
+                  </li>
+                </ul>
+                <p className="visitor-info-p">
+                  Vaše volby se ukládají anonymně pro tuto akci.
+                </p>
+              </div>
               <p className="visitor-modal-madeby">
-                {t("visitor.infoFooterMadeBy")}{" "}
                 <a
                   href="https://scoretaste.cz"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  ScoreTaste.cz
+                  <img
+                    src={madeByLogo}
+                    alt="ScoreTaste.cz"
+                    className="visitor-madeby-logo"
+                    width={128}
+                    height={28}
+                    decoding="async"
+                  />
                 </a>
               </p>
             </div>
             <button
               type="button"
               className="visitor-modal-ok"
-              onClick={() => setInfoOpen(false)}
+              onClick={dismissInfoModal}
             >
               {t("visitor.modalOk")}
             </button>

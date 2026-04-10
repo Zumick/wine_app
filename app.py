@@ -2812,7 +2812,7 @@ def _admin_stats_wine_rows(conn, event_id):
     eid = int(event_id)
     rows = conn.execute(
         """
-        SELECT w.id, w.label, y.name AS winery_name,
+        SELECT w.id, w.label, w.vintage, y.name AS winery_name,
           COALESCE(SUM(CASE WHEN f.liked = 1 THEN 1 ELSE 0 END), 0) AS likes,
           COALESCE(SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END), 0) AS want_buy
         FROM scoretaste_wines w
@@ -2835,6 +2835,7 @@ def _admin_stats_wine_rows(conn, event_id):
             {
                 "id": r["id"],
                 "label": r["label"],
+                "vintage": r["vintage"],
                 "winery_name": r["winery_name"],
                 "likes": int(r["likes"] or 0),
                 "want_buy": int(r["want_buy"] or 0),
@@ -2913,6 +2914,93 @@ def _admin_stats_top_cards(conn, event_id):
     return top_wines, top_wineries, top_varieties
 
 
+def _admin_stats_purchase_shortlist_rate(conn, event_id):
+    """Vytvořený výběr pro nákup (aktivní epocha): min. 1 TOP a min. 3 označená vína."""
+    eid = int(event_id)
+    row = conn.execute(
+        """
+        WITH active_epoch AS (
+          SELECT id
+          FROM scoretaste_event_collection_epoch
+          WHERE event_id = ? AND is_active = 1
+          LIMIT 1
+        ),
+        per_device AS (
+          SELECT
+            f.session_key AS device_id,
+            SUM(CASE WHEN (f.liked = 1 OR f.want_to_buy = 1) THEN 1 ELSE 0 END) AS selected_count,
+            SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END) AS top_count
+          FROM scoretaste_visitor_wine_flag f
+          JOIN active_epoch ae ON ae.id = f.epoch_id
+          WHERE f.event_id = ?
+          GROUP BY f.session_key
+        )
+        SELECT
+          COALESCE(SUM(CASE WHEN selected_count >= 1 THEN 1 ELSE 0 END), 0) AS denominator,
+          COALESCE(SUM(CASE WHEN selected_count >= 3 AND top_count >= 1 THEN 1 ELSE 0 END), 0) AS numerator
+        FROM per_device
+        """,
+        (eid, eid),
+    ).fetchone()
+    num = int(row["numerator"] or 0) if row else 0
+    den = int(row["denominator"] or 0) if row else 0
+    val = round((num / den) * 100.0, 1) if den > 0 else None
+    return {"value": val, "numerator": num, "denominator": den}
+
+
+def _admin_stats_qualified_return_rate(conn, event_id):
+    """Kvalifikovaný návrat: min. 2 selection akce a následný open_my_wines v aktivní epoše."""
+    eid = int(event_id)
+    row = conn.execute(
+        """
+        WITH active_epoch AS (
+          SELECT id
+          FROM scoretaste_event_collection_epoch
+          WHERE event_id = ? AND is_active = 1
+          LIMIT 1
+        ),
+        qualified_devices AS (
+          SELECT
+            l.device_id,
+            MIN(l.created_at) AS first_selection_at,
+            COUNT(*) AS selection_actions
+          FROM scoretaste_visitor_selection_event_log l
+          JOIN active_epoch ae ON ae.id = l.epoch_id
+          WHERE l.event_id = ?
+            AND l.action_type IN ('set_favorite', 'set_top')
+          GROUP BY l.device_id
+          HAVING COUNT(*) >= 2
+        )
+        SELECT
+          (SELECT COUNT(*) FROM qualified_devices) AS denominator,
+          (
+            SELECT COUNT(*)
+            FROM qualified_devices s
+            WHERE EXISTS (
+              SELECT 1
+              FROM scoretaste_visitor_selection_event_log o
+              JOIN active_epoch ae2 ON ae2.id = o.epoch_id
+              WHERE o.event_id = ?
+                AND o.device_id = s.device_id
+                AND o.action_type = 'open_my_wines'
+                AND o.created_at > s.first_selection_at
+            )
+          ) AS numerator
+        """,
+        (eid, eid, eid),
+    ).fetchone()
+    num = int(row["numerator"] or 0) if row else 0
+    den = int(row["denominator"] or 0) if row else 0
+    val = round((num / den) * 100.0, 1) if den > 0 else None
+    return {"value": val, "numerator": num, "denominator": den}
+
+
+def _fmt_pct_cz(v):
+    if v is None:
+        return "—"
+    return f"{float(v):.1f} %".replace(".", ",")
+
+
 def _admin_tab_url(admin_base, tab, winery_id=None):
     q = {"tab": tab}
     if tab == "catalog" and winery_id:
@@ -2922,7 +3010,7 @@ def _admin_tab_url(admin_base, tab, winery_id=None):
 
 def _admin_tab_from_form():
     t = (request.form.get("redirect_tab") or "").strip().lower()
-    return t if t in ("catalog", "stats", "import") else "catalog"
+    return t if t in ("catalog", "stats", "import", "report") else "catalog"
 
 
 def _admin_event_readiness(catalog, wines_by_wid):
@@ -3293,23 +3381,25 @@ def _html_guide_admin_page(
         .admin-header-host-link:hover {{ text-decoration: underline; }}
         .admin-header-flash-row {{ width: 100%; flex-basis: 100%; margin-top: 6px; }}
         .admin-header-flash-row .admin-flash {{ margin: 4px 0; text-align: left; }}
-        .admin-op-panel {{ margin-bottom: 12px; padding: 10px 12px; }}
-        .admin-op-panel-inner {{ display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px 18px; justify-content: space-between; }}
-        .admin-op-col {{ flex: 1 1 200px; min-width: 0; }}
-        .admin-op-col--mode {{ flex: 0 1 240px; text-align: center; align-self: center; }}
-        .admin-op-col--actions {{ flex: 0 0 auto; text-align: right; align-self: center; min-width: 160px; }}
-        .admin-op-label {{ margin: 0 0 6px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }}
-        .admin-op-mode-title {{ margin: 0; font-size: 0.9375rem; font-weight: 600; color: #111827; }}
-        .admin-op-mode-ts {{ margin: 5px 0 0; font-size: 0.8125rem; color: #4b5563; }}
-        .admin-op-live-pill {{ display: inline-block; padding: 4px 10px; border-radius: 999px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; font-size: 0.8125rem; font-weight: 600; }}
-        .btn-link-quiet {{ background: none; border: none; color: #6b7280; font-size: 12px; text-decoration: underline; cursor: pointer; padding: 6px 0; font-family: inherit; }}
+        .admin-op-panel {{ margin-bottom: 10px; padding: 8px 10px; }}
+        .admin-op-panel-inner {{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }}
+        .admin-op-col {{ flex: 1 1 340px; min-width: 0; }}
+        .admin-op-col--live {{ flex: 1 1 280px; }}
+        .admin-op-label {{ margin: 0 0 3px; font-size: 0.78rem; font-weight: 700; color: #374151; }}
+        .admin-op-mode-title {{ margin: 0; font-size: 0.92rem; font-weight: 600; color: #111827; }}
+        .admin-op-mode-ts {{ margin: 0; font-size: 0.8125rem; color: #4b5563; line-height: 1.3; }}
+        .admin-op-live-row1 {{ display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin: 0; }}
+        .admin-op-live-pill {{ display: inline-block; padding: 3px 8px; border-radius: 999px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; font-size: 0.78rem; font-weight: 600; margin: 0; }}
+        .admin-op-live-meta {{ margin: 0; font-size: 0.8125rem; color: #4b5563; line-height: 1.3; }}
+        .admin-op-live-row2 {{ margin: 1px 0 0; }}
+        .btn-link-quiet {{ background: none; border: none; color: #6b7280; font-size: 11.5px; text-decoration: underline; cursor: pointer; padding: 0; font-family: inherit; }}
         .btn-link-quiet:hover {{ color: #374151; }}
         dialog.admin-dialog {{ border: 1px solid #d1d5db; border-radius: 10px; padding: 0; max-width: 26rem; }}
         dialog.admin-dialog::backdrop {{ background: rgba(15, 23, 42, 0.38); }}
         .admin-dialog-body {{ padding: 16px 18px; }}
         .admin-dialog-warn {{ margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: #374151; }}
         .admin-dialog-actions {{ display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }}
-        .admin-readiness-inline--panel {{ margin: 0; }}
+        .admin-readiness-inline--panel {{ margin: 0; gap: 5px; flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; }}
         .box {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; background: #fff; }}
         .box-tight h2 {{ margin: 0 0 10px; font-size: 1.05rem; }}
         .add-winery-row {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }}
@@ -3344,7 +3434,7 @@ def _html_guide_admin_page(
         .admin-readiness-head {{ display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }}
         .admin-readiness-summary-title {{ margin: 0; font-size: 1.05rem; font-weight: 700; }}
         .admin-readiness-inline {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
-        .admin-readiness-chip {{ display: inline-flex; gap: 6px; align-items: center; border: 1px solid #e5e7eb; border-radius: 999px; padding: 5px 10px; background: #f9fafb; font-size: 13px; }}
+        .admin-readiness-chip {{ display: inline-flex; gap: 6px; align-items: center; border: 1px solid #e5e7eb; border-radius: 999px; padding: 3px 8px; background: #f9fafb; font-size: 12px; flex: 0 0 auto; }}
         .admin-readiness-chip strong {{ font-variant-numeric: tabular-nums; }}
         .admin-readiness-chip-warn {{ background: #fee2e2; border-color: #fca5a5; color: #991b1b; }}
         .admin-readiness-chip-ok {{ background: #dcfce7; border-color: #86efac; color: #166534; }}
@@ -3382,9 +3472,17 @@ def _html_guide_admin_page(
         .admin-tab {{ display: inline-block; padding: 10px 16px; text-decoration: none; color: #374151; border-radius: 8px 8px 0 0; margin-bottom: -1px; border: 1px solid transparent; border-bottom: none; font-weight: 600; font-size: 14px; }}
         .admin-tab:hover {{ background: #f3f4f6; color: #111; }}
         .admin-tab-active {{ background: #fff; color: #1d4ed8; border-color: #e5e7eb; border-bottom: 1px solid #fff; }}
+        .stats-page-head {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }}
         .stats-summary {{ font-size: 1.05rem; margin: 0 0 4px; font-weight: 700; }}
         .stats-summary-val {{ font-variant-numeric: tabular-nums; }}
-        .stats-note {{ margin: 6px 0 14px; padding-left: 12px; border-left: 3px solid #d1d5db; }}
+        .stats-summary-main {{ margin: 0 0 2px; font-size: 1.22rem; font-weight: 800; color: #1f3f99; }}
+        .stats-summary-main .stats-summary-val {{ font-size: 1.28rem; }}
+        .stats-summary-sub {{ margin: 0 0 10px; font-size: 12px; color: #6b7280; }}
+        .stats-note {{ margin: 0 0 10px; font-size: 13px; color: #4b5563; }}
+        .explain-toggle-btn {{ border: 1px solid #d1d5db; background: #fff; color: #4b5563; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }}
+        .explain-toggle-btn:hover {{ color: #111827; border-color: #9ca3af; }}
+        .help-text {{ display: none; margin: 4px 0 0; font-size: 12px; color: #6b7280; line-height: 1.35; }}
+        .help-visible .help-text {{ display: block; }}
         .stats-top-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 10px 0 16px; }}
         .stats-top-card {{ border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; padding: 10px 12px; }}
         .stats-top-card h4 {{ margin: 0 0 8px; font-size: 0.95rem; }}
@@ -3393,10 +3491,38 @@ def _html_guide_admin_page(
         .stats-top-list li:last-child {{ border-bottom: none; }}
         .stats-top-item-label {{ min-width: 0; flex: 1; }}
         .stats-top-item-points {{ min-width: 2.5rem; text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }}
-        .stats-table {{ width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }}
-        .stats-table th, .stats-table td {{ border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; }}
-        .stats-table th {{ background: #f9fafb; font-weight: 700; }}
-        .stats-table tr:nth-child(even) {{ background: #fafafa; }}
+        .stats-collapsible summary {{ cursor: pointer; font-weight: 600; color: #374151; margin-bottom: 8px; }}
+        .report-head {{ margin: 0 0 10px; }}
+        .report-title {{ margin: 0; font-size: 1.1rem; font-weight: 700; color: #111827; }}
+        .report-sub {{ margin: 4px 0 0; font-size: 13px; color: #6b7280; }}
+        .report-kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 10px 0 14px; }}
+        .report-kpi {{ border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; padding: 10px 12px; }}
+        .report-kpi-main {{ border-color: #c7d2fe; background: #eef2ff; }}
+        .report-kpi-label {{ margin: 0; font-size: 12px; color: #6b7280; }}
+        .report-kpi-val {{ margin: 3px 0 0; font-size: 1.35rem; font-weight: 800; line-height: 1.1; color: #111827; font-variant-numeric: tabular-nums; }}
+        .report-kpi-sub {{ margin: 4px 0 0; font-size: 12px; color: #4b5563; }}
+        .report-lists {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 0 0 12px; }}
+        .report-list-card {{ border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; padding: 10px 12px; }}
+        .report-list-title {{ margin: 0 0 8px; font-size: 0.94rem; font-weight: 700; }}
+        .report-list {{ margin: 0; padding-left: 18px; }}
+        .report-list li {{ margin: 4px 0; font-size: 13px; line-height: 1.35; }}
+        .report-summary {{ border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; padding: 10px 12px; margin-top: 8px; }}
+        .report-summary p {{ margin: 0 0 8px; font-size: 13px; line-height: 1.5; color: #374151; white-space: pre-line; }}
+        .report-summary p:last-child {{ margin-bottom: 0; }}
+        .report-actions {{ margin-top: 8px; display: flex; justify-content: flex-end; }}
+        .report-detail {{ margin-top: 14px; border-top: 1px solid #e5e7eb; padding-top: 10px; }}
+        .report-detail summary {{ cursor: pointer; color: #4b5563; font-size: 13px; font-weight: 600; }}
+        .report-detail-inner {{ margin-top: 10px; }}
+        .report-detail-filter {{ width: 100%; max-width: 320px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12px; margin-bottom: 8px; }}
+        .report-detail-wrap {{ max-height: 350px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }}
+        .report-detail-table {{ width: 100%; border-collapse: collapse; font-size: 12px; color: #374151; }}
+        .report-detail-table thead th {{ position: sticky; top: 0; z-index: 1; background: #f8fafc; border-bottom: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; font-weight: 700; }}
+        .report-detail-table td {{ border-bottom: 1px solid #eef2f7; padding: 6px 8px; vertical-align: top; }}
+        .report-detail-table tr:last-child td {{ border-bottom: none; }}
+        .report-detail-table .num {{ text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+        .report-detail-table .num strong {{ font-weight: 700; }}
+        .report-sort-btn {{ border: none; background: transparent; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }}
+        .report-sort-arrow {{ color: #9ca3af; font-size: 10px; }}
         .import-hint {{ font-size: 13px; color: #4b5563; line-height: 1.55; margin: 0 0 12px; max-width: 52rem; }}
     </style>
 </head>
@@ -3427,57 +3553,64 @@ def _html_guide_admin_page(
     cat_href = escape(_admin_tab_url(admin_base, "catalog", sel or None))
     stats_href = escape(_admin_tab_url(admin_base, "stats"))
     imp_href = escape(_admin_tab_url(admin_base, "import"))
+    report_href = escape(_admin_tab_url(admin_base, "report"))
     map_edit_href = escape(f"{URL_GUIDE_APP_PREFIX}/e/{int(event_id)}/map-editor")
     tc = " admin-tab-active" if active_tab == "catalog" else ""
     ts = " admin-tab-active" if active_tab == "stats" else ""
     ti = " admin-tab-active" if active_tab == "import" else ""
+    trp = " admin-tab-active" if active_tab == "report" else ""
     tabs_html = f"""
     <nav class="admin-tabs" aria-label="Sekce správy">
       <a class="admin-tab{tc}" href="{cat_href}">Katalog</a>
       <a class="admin-tab{ts}" href="{stats_href}">Statistiky</a>
       <a class="admin-tab{ti}" href="{imp_href}">Import CSV</a>
+      <a class="admin-tab{trp}" href="{report_href}">Report pro organizátora</a>
       <a class="admin-tab" href="{map_edit_href}">Editace mapy</a>
     </nav>
 """
     rt = escape(active_tab)
     ts_disp = escape(_format_live_started_cz(live_started)) if live_started else ""
-    epoch_meta_html = ""
-    if active_live_epoch is not None and live_started:
+    epoch_num_disp = ""
+    if active_live_epoch is not None:
         try:
-            epi = int(active_live_epoch["id"])
             epn = int(active_live_epoch["epoch_number"])
-            epoch_meta_html = (
-                f'<p class="admin-op-mode-ts" style="margin-top:4px;font-size:12px;color:#6b7280;">'
-                f"Běh č. {epn} · epocha id {epi}</p>"
-            )
+            if epn > 0:
+                epoch_num_disp = f"Běh č. {epn}"
         except (KeyError, IndexError, TypeError, ValueError):
-            epoch_meta_html = ""
+            epoch_num_disp = ""
     if live_started:
-        mode_block = f"""          <p class="admin-op-live-pill" role="status">Ostrý sběr aktivní</p>
-          <p class="admin-op-mode-ts">Zahájeno: {ts_disp}</p>{epoch_meta_html}"""
-        actions_block = """          <button type="button" class="btn-link-quiet" id="admin-open-dlg-live-reset">Resetovat a zahájit znovu</button>"""
+        live_meta = f"Zahájeno: {ts_disp}"
+        if epoch_num_disp:
+            live_meta = f"{live_meta} · {epoch_num_disp}"
+        mode_block = f"""          <div class="admin-op-live-row1">
+            <p class="admin-op-live-pill" role="status">Ostrý sběr aktivní</p>
+            <p class="admin-op-live-meta">{live_meta}</p>
+          </div>
+          <div class="admin-op-live-row2">
+            <button type="button" class="btn-link-quiet" id="admin-open-dlg-live-reset">Resetovat a zahájit znovu</button>
+          </div>"""
     else:
-        mode_block = """          <p class="admin-op-mode-title">Příprava</p>"""
-        actions_block = """          <button type="button" class="btn btn-primary" id="admin-open-dlg-live-start">Zahájit ostrý sběr dat</button>"""
+        mode_block = """          <div class="admin-op-live-row1">
+            <p class="admin-op-mode-title">Příprava</p>
+          </div>
+          <div class="admin-op-live-row2">
+            <button type="button" class="btn btn-primary btn-sm" id="admin-open-dlg-live-start">Zahájit ostrý sběr dat</button>
+          </div>"""
 
     op_panel_html = f"""    <div class="admin-op-panel box" role="region" aria-label="Připravenost a režim sběru dat">
       <div class="admin-op-panel-inner">
         <div class="admin-op-col">
           <p class="admin-op-label">Připravenost akce</p>
           <div class="admin-readiness-inline admin-readiness-inline--panel">
-            <span class="admin-readiness-chip">Vinařství celkem: <strong>{readiness["n_total"]}</strong></span>
-            <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_wines"] > 0 else ''}">Bez zadaných vzorků: <strong>{readiness["n_without_wines"]}</strong></span>
+            <span class="admin-readiness-chip">Vinařství: <strong>{readiness["n_total"]}</strong></span>
+            <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_wines"] > 0 else ''}">Bez vzorků: <strong>{readiness["n_without_wines"]}</strong></span>
             <span class="admin-readiness-chip{' admin-readiness-chip-warn' if readiness["n_without_loc"] > 0 else ''}">Bez čísla sklepu: <strong>{readiness["n_without_loc"]}</strong></span>
-            <span class="admin-readiness-chip {'admin-readiness-chip-ok' if readiness["is_ready"] else 'admin-readiness-chip-bad'}">Celkový status: <strong>{'Připraveno k publikaci' if readiness["is_ready"] else 'Nepřipraveno k publikaci'}</strong></span>
+            <span class="admin-readiness-chip {'admin-readiness-chip-ok' if readiness["is_ready"] else 'admin-readiness-chip-bad'}">Status: <strong>{'Připraveno k publikaci' if readiness["is_ready"] else 'Nepřipraveno k publikaci'}</strong></span>
           </div>
         </div>
-        <div class="admin-op-col admin-op-col--mode">
-          <p class="admin-op-label">Režim akce</p>
+        <div class="admin-op-col admin-op-col--live">
+          <p class="admin-op-label">Stav ostrého sběru</p>
 {mode_block}
-        </div>
-        <div class="admin-op-col admin-op-col--actions">
-          <p class="admin-op-label">Sběr dat</p>
-          <div>{actions_block}</div>
         </div>
       </div>
     </div>
@@ -3715,8 +3848,8 @@ def _html_guide_admin_page(
         conn = get_connection()
         try:
             au = _admin_stats_active_users(conn, event_id)
-            wine_rows = _admin_stats_wine_rows(conn, event_id)
-            top_wines, top_wineries, top_varieties = _admin_stats_top_cards(conn, event_id)
+            shortlist = _admin_stats_purchase_shortlist_rate(conn, event_id)
+            top_wines, top_wineries, _top_varieties = _admin_stats_top_cards(conn, event_id)
         finally:
             conn.close()
 
@@ -3730,7 +3863,7 @@ def _html_guide_admin_page(
                 f"{int(r['points'] or 0)}"
                 "</span></li>"
             )
-            for r in top_wines
+            for r in top_wines[:5]
         )
         top_wineries_html = "".join(
             (
@@ -3740,52 +3873,33 @@ def _html_guide_admin_page(
                 f"{int(r['points'] or 0)}"
                 "</span></li>"
             )
-            for r in top_wineries
+            for r in top_wineries[:5]
         )
-        top_varieties_html = "".join(
-            (
-                '<li><span class="stats-top-item-label">'
-                f"{escape((str(r['variety_name'] or '').strip() or '—'))}"
-                '</span><span class="stats-top-item-points">'
-                f"{int(r['points'] or 0)}"
-                "</span></li>"
-            )
-            for r in top_varieties
-        )
-        stat_body = "".join(
-            f"<tr><td>{escape(r['label'])}</td><td>{escape(r['winery_name'])}</td>"
-            f"<td>{r['likes']}</td><td>{r['want_buy']}</td></tr>"
-            for r in wine_rows
-        )
+        shortlist_val = "—" if shortlist["value"] is None else f"{shortlist['value']:.1f} %".replace(".", ",")
+        shortlist_sub = f"({shortlist['numerator']} z {shortlist['denominator']} návštěvníků)"
         parts.append(
             f"""
-    <div class="box">
+    <div class="box js-explain-host">
+      <div class="stats-page-head">
+        <h3 class="admin-section-title" style="margin:0;">Statistiky pro organizátora</h3>
+        <button type="button" class="explain-toggle-btn js-explain-toggle">[i] Vysvětlivky</button>
+      </div>
+      <p class="stats-summary-main">Vytvořený výběr pro nákup: <span class="stats-summary-val">{shortlist_val}</span></p>
+      <p class="stats-summary-sub">{shortlist_sub}</p>
+      <p class="help-text">Podíl návštěvníků, kteří si vytvořili užší výběr vín pro nákup.</p>
       <p class="stats-summary">Počet aktivních návštěvníků: <span class="stats-summary-val">{au}</span></p>
-      <p class="import-hint stats-note">
-        Počítají se návštěvníci (prohlížeč), kteří u alespoň jednoho vína zapnuli <strong>lajk</strong>
-        nebo <strong>chtěl bych koupit</strong> (data se synchronizují z aplikace návštěvníka).
-        Čísla se vztahují k <strong>aktuálnímu běhu ostrého sběru</strong> (aktivní epocha); starší běhy nejsou v této tabulce zahrnuty.
-      </p>
+      <p class="help-text">Počet návštěvníků, kteří si označili alespoň jedno víno.</p>
       <div class="stats-top-grid">
         <section class="stats-top-card">
-          <h4>TOP 10 vín</h4>
+          <h4>Největší zájem o nákup</h4>
+          <p class="help-text">Vína s nejvyšším počtem označení jako TOP.</p>
           {"<ol class=\"stats-top-list\">" + top_wines_html + "</ol>" if top_wines_html else "<p class=\"admin-empty\" style=\"padding:8px 0;\">Zatím bez dat.</p>"}
         </section>
         <section class="stats-top-card">
-          <h4>TOP 10 vinařství</h4>
+          <h4>Nejvíce označovaná vinařství</h4>
+          <p class="help-text">Vinařství, jejichž vína byla nejčastěji označována.</p>
           {"<ol class=\"stats-top-list\">" + top_wineries_html + "</ol>" if top_wineries_html else "<p class=\"admin-empty\" style=\"padding:8px 0;\">Zatím bez dat.</p>"}
         </section>
-        <section class="stats-top-card">
-          <h4>TOP 10 odrůd</h4>
-          {"<ol class=\"stats-top-list\">" + top_varieties_html + "</ol>" if top_varieties_html else "<p class=\"admin-empty\" style=\"padding:8px 0;\">Zatím bez dat.</p>"}
-        </section>
-      </div>
-      <h3 class="admin-section-title" style="margin-top:10px;">Všechna vína (řazení: lajky ↓, zájem o koupi ↓)</h3>
-      <div style="overflow-x:auto;">
-        <table class="stats-table">
-          <thead><tr><th>Label</th><th>Vinařství</th><th>Počet like</th><th>Počet chtěl koupit</th></tr></thead>
-          <tbody>{stat_body}</tbody>
-        </table>
       </div>
     </div>
 """
@@ -3813,6 +3927,147 @@ def _html_guide_admin_page(
     </div>
 """
         )
+    elif active_tab == "report":
+        conn = get_connection()
+        try:
+            au = _admin_stats_active_users(conn, event_id)
+            shortlist = _admin_stats_purchase_shortlist_rate(conn, event_id)
+            top_wines, top_wineries, _top_varieties = _admin_stats_top_cards(conn, event_id)
+            wine_rows = _admin_stats_wine_rows(conn, event_id)
+        finally:
+            conn.close()
+
+        top_buy_rows = sorted(
+            wine_rows, key=lambda r: (int(r["want_buy"] or 0), int(r["likes"] or 0)), reverse=True
+        )[:5]
+        top_winery_rows = top_wineries[:5]
+        top_winery_name = (
+            (str(top_winery_rows[0]["winery_name"] or "").strip() or "—")
+            if top_winery_rows
+            else "—"
+        )
+        shortlist_pct = _fmt_pct_cz(shortlist["value"])
+        summary_text = (
+            f"Průvodce během akce aktivně použilo {au} návštěvníků.\n"
+            f"{shortlist_pct} z nich si vytvořilo vlastní výběr vín pro nákup.\n\n"
+            "Návštěvníci využívali průvodce při výběru vín v průběhu akce.\n\n"
+            f"Největší zájem byl o vína z vinařství {top_winery_name}."
+        )
+        summary_html = escape(summary_text)
+        event_name_disp = escape((ev.get("name") or "").strip() or "Akce")
+        event_date_disp = escape((ev.get("date") or "").strip() or "—")
+
+        def _report_list_html(items, label_fn):
+            if not items:
+                return '<p class="admin-empty" style="padding:0;">Zatím bez dat.</p>'
+            return "<ol class=\"report-list\">" + "".join(
+                f"<li>{label_fn(r)}</li>" for r in items
+            ) + "</ol>"
+
+        report_buy_html = _report_list_html(
+            top_buy_rows,
+            lambda r: f"{escape((str(r['label'] or '').strip() or '—'))} — TOP: <strong>{int(r['want_buy'] or 0)}</strong>",
+        )
+        report_winery_html = _report_list_html(
+            top_winery_rows,
+            lambda r: f"{escape((str(r['winery_name'] or '').strip() or '—'))} — <strong>{int(r['points'] or 0)}</strong>",
+        )
+        detail_rows = sorted(
+            wine_rows,
+            key=lambda r: (int(r["want_buy"] or 0), int(r["likes"] or 0), str(r["label"] or "").lower()),
+            reverse=True,
+        )
+        detail_rows_html = "".join(
+            (
+                "<tr "
+                f'data-wine="{escape((str(r["label"] or "").strip().lower()))}" '
+                f'data-winery="{escape((str(r["winery_name"] or "").strip().lower()))}" '
+                f'data-year="{escape((str(r["vintage"] or "").strip()))}" '
+                f'data-like="{int(r["likes"] or 0)}" '
+                f'data-top="{int(r["want_buy"] or 0)}">'
+                f"<td>{escape((str(r['label'] or '').strip() or '—'))}</td>"
+                f"<td>{escape((str(r['vintage'] or '').strip() or '—'))}</td>"
+                f"<td>{escape((str(r['winery_name'] or '').strip() or '—'))}</td>"
+                f'<td class="num"><strong>{int(r["likes"] or 0)}</strong></td>'
+                f'<td class="num"><strong>{int(r["want_buy"] or 0)}</strong></td>'
+                "</tr>"
+            )
+            for r in detail_rows
+        )
+
+        parts.append(
+            f"""
+    <div class="box js-explain-host">
+      <div class="stats-page-head">
+        <div class="report-head" style="margin:0;">
+          <h2 class="report-title">Souhrn využití průvodce degustací</h2>
+          <p class="report-sub">{event_name_disp} · {event_date_disp}</p>
+        </div>
+        <button type="button" class="explain-toggle-btn js-explain-toggle">[i] Vysvětlivky</button>
+      </div>
+      <div class="report-kpis">
+        <section class="report-kpi report-kpi-main">
+          <p class="report-kpi-label">Vytvořený výběr pro nákup</p>
+          <p class="report-kpi-val">{shortlist_pct}</p>
+          <p class="report-kpi-sub">({shortlist["numerator"]} z {shortlist["denominator"]} návštěvníků)</p>
+          <p class="help-text">Podíl návštěvníků, kteří si vytvořili užší výběr vín pro nákup.</p>
+        </section>
+        <section class="report-kpi">
+          <p class="report-kpi-label">Aktivní návštěvníci</p>
+          <p class="report-kpi-val">{au}</p>
+          <p class="help-text">Počet návštěvníků, kteří si označili alespoň jedno víno.</p>
+        </section>
+      </div>
+      <div class="report-lists">
+        <section class="report-list-card">
+          <h3 class="report-list-title">Největší zájem o nákup</h3>
+          <p class="help-text">Vína s nejvyšším počtem označení jako TOP.</p>
+          {report_buy_html}
+        </section>
+        <section class="report-list-card">
+          <h3 class="report-list-title">Nejvíce označovaná vinařství</h3>
+          <p class="help-text">Vinařství, jejichž vína byla nejčastěji označována.</p>
+          {report_winery_html}
+        </section>
+      </div>
+      <section class="report-summary">
+        <p id="organizer-report-summary">{summary_html}</p>
+        <div class="report-actions">
+          <button type="button" class="btn btn-sm" id="copy-organizer-report">Kopírovat shrnutí</button>
+        </div>
+      </section>
+      <section class="report-detail">
+        <h3 class="report-list-title">Detailní přehled vín</h3>
+        <details>
+          <summary>Zobrazit kompletní žebříček ↓</summary>
+          <div class="report-detail-inner">
+            <input
+              type="search"
+              id="report-detail-filter"
+              class="report-detail-filter"
+              placeholder="Hledat víno nebo vinařství..."
+              autocomplete="off"
+            />
+            <div class="report-detail-wrap">
+              <table class="report-detail-table" id="report-wine-table">
+                <thead>
+                  <tr>
+                    <th><button type="button" class="report-sort-btn" data-sort="wine">Víno <span class="report-sort-arrow">↕</span></button></th>
+                    <th><button type="button" class="report-sort-btn" data-sort="year">Rok <span class="report-sort-arrow">↕</span></button></th>
+                    <th><button type="button" class="report-sort-btn" data-sort="winery">Vinařství <span class="report-sort-arrow">↕</span></button></th>
+                    <th class="num"><button type="button" class="report-sort-btn" data-sort="like">❤️ <span class="report-sort-arrow">↕</span></button></th>
+                    <th class="num"><button type="button" class="report-sort-btn" data-sort="top">⭐ <span class="report-sort-arrow">↕</span></button></th>
+                  </tr>
+                </thead>
+                <tbody>{detail_rows_html}</tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+      </section>
+    </div>
+"""
+        )
     parts.append(
         """
 <script>
@@ -3835,6 +4090,127 @@ def _html_guide_admin_page(
   const oReset = document.getElementById("admin-open-dlg-live-reset");
   const dlgReset = document.getElementById("admin-dlg-live-reset");
   if (oReset && dlgReset) oReset.addEventListener("click", () => dlgReset.showModal());
+  const explainKey = "admin:explain-help-visible";
+  const applyExplainState = (on) => {
+    document.querySelectorAll(".js-explain-host").forEach((el) => {
+      el.classList.toggle("help-visible", !!on);
+    });
+    document.querySelectorAll(".js-explain-toggle").forEach((btn) => {
+      btn.textContent = on ? "[i] Skrýt vysvětlivky" : "[i] Vysvětlivky";
+    });
+  };
+  let explainOn = false;
+  try {
+    explainOn = localStorage.getItem(explainKey) === "1";
+  } catch (_) {}
+  applyExplainState(explainOn);
+  document.querySelectorAll(".js-explain-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      explainOn = !explainOn;
+      try { localStorage.setItem(explainKey, explainOn ? "1" : "0"); } catch (_) {}
+      applyExplainState(explainOn);
+    });
+  });
+  const copyReportBtn = document.getElementById("copy-organizer-report");
+  const reportSummary = document.getElementById("organizer-report-summary");
+  if (copyReportBtn && reportSummary) {
+    copyReportBtn.addEventListener("click", async () => {
+      const txt = (reportSummary.textContent || "").trim();
+      if (!txt) return;
+      try {
+        await navigator.clipboard.writeText(txt);
+      } catch (_) {
+        window.prompt("Zkopírujte shrnutí ručně:", txt);
+      }
+    });
+  }
+  const reportTable = document.getElementById("report-wine-table");
+  const reportFilter = document.getElementById("report-detail-filter");
+  if (reportTable) {
+    const tbody = reportTable.querySelector("tbody");
+    const headerButtons = reportTable.querySelectorAll(".report-sort-btn");
+    if (tbody) {
+      const allRows = Array.from(tbody.querySelectorAll("tr"));
+      let sortKey = "top";
+      let sortDir = "desc";
+      let filterQ = "";
+
+      const asNum = (v) => {
+        const n = Number(v || 0);
+        return Number.isFinite(n) ? n : 0;
+      };
+      const asTxt = (v) => String(v || "").toLocaleLowerCase("cs-CZ");
+
+      const compareRows = (a, b, key, dir) => {
+        const mult = dir === "asc" ? 1 : -1;
+        if (key === "top") {
+          const d = asNum(a.dataset.top) - asNum(b.dataset.top);
+          if (d !== 0) return d * mult;
+          const d2 = asNum(a.dataset.like) - asNum(b.dataset.like);
+          if (d2 !== 0) return d2 * mult;
+          return asTxt(a.dataset.wine).localeCompare(asTxt(b.dataset.wine), "cs") * mult;
+        }
+        if (key === "like") {
+          const d = asNum(a.dataset.like) - asNum(b.dataset.like);
+          if (d !== 0) return d * mult;
+          const d2 = asNum(a.dataset.top) - asNum(b.dataset.top);
+          if (d2 !== 0) return d2 * mult;
+          return asTxt(a.dataset.wine).localeCompare(asTxt(b.dataset.wine), "cs") * mult;
+        }
+        if (key === "year") {
+          return (asTxt(a.dataset.year).localeCompare(asTxt(b.dataset.year), "cs", { numeric: true })) * mult;
+        }
+        if (key === "winery") {
+          return asTxt(a.dataset.winery).localeCompare(asTxt(b.dataset.winery), "cs") * mult;
+        }
+        return asTxt(a.dataset.wine).localeCompare(asTxt(b.dataset.wine), "cs") * mult;
+      };
+
+      const renderRows = () => {
+        const q = filterQ.trim().toLocaleLowerCase("cs-CZ");
+        const filtered = q
+          ? allRows.filter((r) => {
+              const wine = asTxt(r.dataset.wine);
+              const winery = asTxt(r.dataset.winery);
+              return wine.includes(q) || winery.includes(q);
+            })
+          : [...allRows];
+        filtered.sort((a, b) => compareRows(a, b, sortKey, sortDir));
+        tbody.innerHTML = "";
+        filtered.forEach((r) => tbody.appendChild(r));
+        headerButtons.forEach((btn) => {
+          const arrow = btn.querySelector(".report-sort-arrow");
+          if (!arrow) return;
+          if (btn.getAttribute("data-sort") === sortKey) {
+            arrow.textContent = sortDir === "asc" ? "↑" : "↓";
+          } else {
+            arrow.textContent = "↕";
+          }
+        });
+      };
+
+      headerButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.getAttribute("data-sort") || "top";
+          if (sortKey === key) {
+            sortDir = sortDir === "asc" ? "desc" : "asc";
+          } else {
+            sortKey = key;
+            sortDir = key === "wine" || key === "winery" || key === "year" ? "asc" : "desc";
+          }
+          renderRows();
+        });
+      });
+
+      if (reportFilter) {
+        reportFilter.addEventListener("input", () => {
+          filterQ = reportFilter.value || "";
+          renderRows();
+        });
+      }
+      renderRows();
+    }
+  }
 })();
 </script>
 </div>
@@ -4048,7 +4424,7 @@ def guide_admin_catalog(event_id):
     req_w = (request.args.get("winery") or "").strip()
     selected_winery_id = req_w if req_w.isdigit() else None
     tab = (request.args.get("tab") or "catalog").strip().lower()
-    if tab not in ("catalog", "stats", "import"):
+    if tab not in ("catalog", "stats", "import", "report"):
         tab = "catalog"
     conn = get_connection()
     try:
