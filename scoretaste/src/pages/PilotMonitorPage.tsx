@@ -11,8 +11,12 @@ type MonitorEvent = {
 };
 
 type MonitorKpis = {
-  activeDevices: number;
-  devicesWithSelection: number;
+  activeDevicesRate?: {
+    value: number | null;
+    numerator: number;
+    denominator: number;
+  };
+  averageMarkedWinesPerDevice: number | null;
   totalFavorites: number;
   totalTop: number;
   qualifiedReturnRate?: {
@@ -76,6 +80,14 @@ function modeLabel(mode: MonitorEvent["mode"]): string {
 function fmtRate(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return `${Math.round(value)} %`;
+}
+
+function fmtAvgOneDecimal(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return value.toLocaleString("cs-CZ", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
 }
 
 export function PilotMonitorPage() {
@@ -225,12 +237,16 @@ export function PilotMonitorPage() {
                   jen uživatelé s alespoň 2 akcemi označení.
                 </p>
                 <p>
-                  <strong>Aktivní zařízení</strong>: Počet anonymních zařízení, která v
-                  aktuálním běhu provedla aktivitu.
+                  <strong>Aktivní zařízení</strong>: Podíl zařízení s alespoň jedním
+                  oblíbeným vínem (like) vůči zařízením, která v dané epoše alespoň jednou
+                  otevřela seznam vinařství (událost open_winery_list). Pod
+                  procenty je uvedeno „počet z celkem“.
                 </p>
                 <p>
-                  <strong>Zařízení s označením</strong>: Počet zařízení, která si v
-                  aktuálním běhu označila alespoň jedno víno.
+                  <strong>Průměrný počet like</strong>: Průměrný počet označených vín na
+                  jedno zařízení mezi těmi, kteří mají alespoň jedno oblíbené nebo alespoň
+                  jedno TOP. Každé víno se počítá nejvýše jednou (oblíbené i TOP u stejného
+                  vína = jedna jednotka).
                 </p>
                 <p>
                   <strong>Oblíbené</strong>: Celkový počet vín označených jako oblíbené v
@@ -269,14 +285,21 @@ export function PilotMonitorPage() {
                 </span>
               </div>
               <div className="pilot-monitor-kpi">
-                <span className="pilot-monitor-kpi-val">{data.kpis.activeDevices}</span>
+                <span className="pilot-monitor-kpi-val">
+                  {fmtRate(data.kpis.activeDevicesRate?.value)}
+                </span>
                 <span className="pilot-monitor-kpi-lbl">Aktivní zařízení</span>
+                <span className="pilot-monitor-kpi-sub">
+                  {data.kpis.activeDevicesRate
+                    ? `${data.kpis.activeDevicesRate.numerator} z ${data.kpis.activeDevicesRate.denominator}`
+                    : "—"}
+                </span>
               </div>
               <div className="pilot-monitor-kpi">
                 <span className="pilot-monitor-kpi-val">
-                  {data.kpis.devicesWithSelection}
+                  {fmtAvgOneDecimal(data.kpis.averageMarkedWinesPerDevice)}
                 </span>
-                <span className="pilot-monitor-kpi-lbl">Zařízení s označením</span>
+                <span className="pilot-monitor-kpi-lbl">Průměrný počet like</span>
               </div>
               <div className="pilot-monitor-kpi">
                 <span className="pilot-monitor-kpi-val">

@@ -3179,11 +3179,10 @@ def _pilot_monitor_payload_for_event(conn, event_id):
     kpi_row = conn.execute(
         """
         SELECT
-          COALESCE(COUNT(DISTINCT f.session_key), 0) AS active_devices,
           COALESCE(
-            COUNT(DISTINCT CASE WHEN (f.liked = 1 OR f.want_to_buy = 1) THEN f.session_key END),
+            COUNT(DISTINCT CASE WHEN f.liked = 1 THEN f.session_key END),
             0
-          ) AS devices_with_marks,
+          ) AS devices_with_like,
           COALESCE(SUM(CASE WHEN f.liked = 1 AND f.want_to_buy = 0 THEN 1 ELSE 0 END), 0) AS favorites,
           COALESCE(SUM(CASE WHEN f.want_to_buy = 1 THEN 1 ELSE 0 END), 0) AS top
         FROM scoretaste_visitor_wine_flag f
@@ -3196,9 +3195,56 @@ def _pilot_monitor_payload_for_event(conn, event_id):
         (eid, eid),
     ).fetchone()
 
+    reg_row = conn.execute(
+        """
+        SELECT COALESCE(COUNT(DISTINCT l.device_id), 0) AS registered_devices
+        FROM scoretaste_visitor_selection_event_log l
+        WHERE l.event_id = ?
+          AND l.action_type = 'open_winery_list'
+          AND l.epoch_id IN (
+            SELECT e.id FROM scoretaste_event_collection_epoch e
+            WHERE e.event_id = ? AND e.is_active = 1
+          )
+        """,
+        (eid, eid),
+    ).fetchone()
+
+    devices_with_like = int(kpi_row["devices_with_like"] or 0)
+    registered_devices = int(reg_row["registered_devices"] or 0)
+
+    avg_marked_row = conn.execute(
+        """
+        SELECT AVG(marked_wines) AS avg_val
+        FROM (
+          SELECT
+            f.session_key,
+            SUM(CASE WHEN f.liked = 1 OR f.want_to_buy = 1 THEN 1 ELSE 0 END) AS marked_wines
+          FROM scoretaste_visitor_wine_flag f
+          WHERE f.event_id = ?
+            AND f.epoch_id IN (
+              SELECT e.id FROM scoretaste_event_collection_epoch e
+              WHERE e.event_id = ? AND e.is_active = 1
+            )
+          GROUP BY f.session_key
+          HAVING SUM(CASE WHEN f.liked = 1 OR f.want_to_buy = 1 THEN 1 ELSE 0 END) >= 1
+        ) t
+        """,
+        (eid, eid),
+    ).fetchone()
+    avg_raw = avg_marked_row["avg_val"] if avg_marked_row else None
+    average_marked = (
+        round(float(avg_raw), 1) if avg_raw is not None and avg_raw != "" else None
+    )
+
     kpis = {
-        "activeDevices": int(kpi_row["active_devices"] or 0),
-        "devicesWithSelection": int(kpi_row["devices_with_marks"] or 0),
+        "activeDevicesRate": {
+            "value": round((devices_with_like / registered_devices) * 100.0, 1)
+            if registered_devices > 0
+            else None,
+            "numerator": devices_with_like,
+            "denominator": registered_devices,
+        },
+        "averageMarkedWinesPerDevice": average_marked,
         "totalFavorites": int(kpi_row["favorites"] or 0),
         "totalTop": int(kpi_row["top"] or 0),
     }
