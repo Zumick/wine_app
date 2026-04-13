@@ -8,6 +8,11 @@ import { useSessionEventCatalog } from "../hooks/useSessionEventCatalog";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { t } from "../i18n";
 import {
+  postSaveSelection,
+  type SavedWinesPayload,
+  SHOW_RESTORED_TOAST_KEY,
+} from "../lib/saveSelectionApi";
+import {
   logVisitorEvent,
   wineIdsWithValidWinery,
   wineStarLevel,
@@ -148,44 +153,22 @@ function printableVintage(vintage: string): string {
   return v;
 }
 
-function buildShareListText(rows: StarredWineRow[], eventName: string): string {
-  const groups = new Map<string, StarredWineRow[]>();
-  for (const row of rows) {
-    const cellar = row.winery?.locationNumber?.trim() || "—";
-    const bucket = groups.get(cellar);
-    if (bucket) {
-      bucket.push(row);
-    } else {
-      groups.set(cellar, [row]);
-    }
+function buildShareableSelectionText(
+  rows: StarredWineRow[],
+  shareUrl: string,
+): string {
+  const lines: string[] = ["Moje vína z degustace:", ""];
+  for (const { wine, winery } of rows) {
+    const cellar = winery?.locationNumber?.trim() || "—";
+    const year = printableVintage(wine.vintage);
+    const part = year
+      ? `Sklep ${cellar} – ${wine.label} ${year}`
+      : `Sklep ${cellar} – ${wine.label}`;
+    lines.push(part);
   }
-
-  const lines: string[] = [];
-  lines.push(`Moje vína – ${eventName}`);
   lines.push("");
-
-  for (const [cellar, items] of groups.entries()) {
-    lines.push(`Sklep ${cellar}`);
-    lines.push("");
-    for (const { wine } of items) {
-      const year = printableVintage(wine.vintage);
-      lines.push(year ? `* ${wine.label} (${year})` : `* ${wine.label}`);
-    }
-    lines.push("");
-  }
-
-  const topRows = rows.filter((row) => row.level === 2);
-  if (topRows.length > 0) {
-    lines.push("TOP:");
-    for (const { wine, winery } of topRows) {
-      const cellar = winery?.locationNumber?.trim() || "—";
-      lines.push(`Sklep ${cellar} – ${wine.label}`);
-    }
-  }
-
-  while (lines.length > 0 && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
+  lines.push("Otevřít průvodce:");
+  lines.push(shareUrl);
   return lines.join("\n");
 }
 
@@ -196,10 +179,13 @@ export function MyWinesPage() {
   const [viewMode, setViewMode] = useState<MyWinesViewMode>("flat");
   const [undoToast, setUndoToast] = useState<UndoPayload | null>(null);
   const [undoSecondsLeft, setUndoSecondsLeft] = useState<number>(UNDO_SECONDS);
-  const [copiedToast, setCopiedToast] = useState(false);
+  const [savedShareToast, setSavedShareToast] = useState(false);
+  const [shareErrorToast, setShareErrorToast] = useState(false);
+  const [restoredToast, setRestoredToast] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const copiedToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const feedbackToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loggedOpenRef = useRef<string | null>(null);
 
   const clearToastTimer = useCallback(() => {
@@ -217,12 +203,27 @@ export function MyWinesPage() {
 
   useEffect(
     () => () => {
-      if (copiedToastTimerRef.current !== null) {
-        clearTimeout(copiedToastTimerRef.current);
+      if (feedbackToastTimerRef.current !== null) {
+        clearTimeout(feedbackToastTimerRef.current);
       }
     },
     [],
   );
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem(SHOW_RESTORED_TOAST_KEY) === "1") {
+        sessionStorage.removeItem(SHOW_RESTORED_TOAST_KEY);
+        setRestoredToast(true);
+        feedbackToastTimerRef.current = window.setTimeout(() => {
+          setRestoredToast(false);
+          feedbackToastTimerRef.current = null;
+        }, 4000);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     if (!eventId) return;
@@ -284,16 +285,26 @@ export function MyWinesPage() {
     [setStarLevel, showRemovalToast],
   );
 
-  const showCopiedToast = useCallback(() => {
-    if (copiedToastTimerRef.current !== null) {
-      clearTimeout(copiedToastTimerRef.current);
-    }
-    setCopiedToast(true);
-    copiedToastTimerRef.current = setTimeout(() => {
-      setCopiedToast(false);
-      copiedToastTimerRef.current = null;
-    }, 2200);
-  }, []);
+  const showFeedbackToast = useCallback(
+    (kind: "saved" | "error") => {
+      if (feedbackToastTimerRef.current !== null) {
+        clearTimeout(feedbackToastTimerRef.current);
+      }
+      if (kind === "saved") {
+        setSavedShareToast(true);
+        setShareErrorToast(false);
+      } else {
+        setShareErrorToast(true);
+        setSavedShareToast(false);
+      }
+      feedbackToastTimerRef.current = window.setTimeout(() => {
+        setSavedShareToast(false);
+        setShareErrorToast(false);
+        feedbackToastTimerRef.current = null;
+      }, 4000);
+    },
+    [],
+  );
 
   const starredRows = useMemo<StarredWineRow[]>(() => {
     if (catalogState.status !== "ok") return [];
@@ -332,8 +343,30 @@ export function MyWinesPage() {
   }, [catalogState]);
 
   const handleShareList = useCallback(async () => {
-    if (starredRows.length === 0) return;
-    const text = buildShareListText(starredRows, eventName);
+    if (starredRows.length === 0 || catalogState.status !== "ok" || !eventId) {
+      return;
+    }
+    setShareBusy(true);
+    const wines: SavedWinesPayload = {};
+    for (const row of starredRows) {
+      const rec = getRecord(row.wine.id);
+      wines[row.wine.id] = {
+        liked: rec.liked,
+        wantToBuy: rec.wantToBuy,
+      };
+    }
+    const epochId = catalogState.catalog.event.activeEpochId ?? null;
+    const res = await postSaveSelection({
+      event_id: eventId,
+      epoch_id: epochId,
+      wines,
+    });
+    setShareBusy(false);
+    if (!res.ok) {
+      showFeedbackToast("error");
+      return;
+    }
+    const text = buildShareableSelectionText(starredRows, res.share_url);
     const nav = navigator as Navigator & {
       share?: (data: { title?: string; text?: string }) => Promise<void>;
       clipboard?: { writeText: (value: string) => Promise<void> };
@@ -342,6 +375,7 @@ export function MyWinesPage() {
     if (nav.share) {
       try {
         await nav.share({ title: eventName, text });
+        showFeedbackToast("saved");
         return;
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
@@ -349,16 +383,22 @@ export function MyWinesPage() {
         }
       }
     }
-
     if (nav.clipboard?.writeText) {
       try {
         await nav.clipboard.writeText(text);
-        showCopiedToast();
       } catch {
         /* no-op */
       }
     }
-  }, [eventName, showCopiedToast, starredRows]);
+    showFeedbackToast("saved");
+  }, [
+    starredRows,
+    catalogState,
+    eventId,
+    getRecord,
+    eventName,
+    showFeedbackToast,
+  ]);
 
   if (!eventId) {
     return <ErrorBlock title={catalogErrorTitle("MISSING_EVENT_ID")} />;
@@ -401,12 +441,13 @@ export function MyWinesPage() {
             type="button"
             className="visitor-mywines-share-btn"
             aria-label={t("myWines.shareAria")}
-            onClick={handleShareList}
-            disabled={starredRows.length === 0}
+            onClick={() => void handleShareList()}
+            disabled={starredRows.length === 0 || shareBusy}
           >
             <span className="visitor-mywines-share-icon" aria-hidden={true}>
               ↗
             </span>
+            <span className="visitor-mywines-share-label">{t("myWines.shareMySelection")}</span>
           </button>
         </div>
       </div>
@@ -476,14 +517,35 @@ export function MyWinesPage() {
           </button>
         </div>
       ) : null}
-      {!undoToast && copiedToast ? (
+      {!undoToast && savedShareToast ? (
         <div
           className="visitor-mywines-toast"
           role="status"
           aria-live="polite"
         >
           <span className="visitor-mywines-toast-text">
-            {t("myWines.copiedToast")}
+            {t("myWines.savedShareToast")}
+          </span>
+        </div>
+      ) : null}
+      {!undoToast && shareErrorToast ? (
+        <div
+          className="visitor-mywines-toast visitor-mywines-toast--warn"
+          role="alert"
+        >
+          <span className="visitor-mywines-toast-text">
+            {t("myWines.shareSaveError")}
+          </span>
+        </div>
+      ) : null}
+      {!undoToast && restoredToast ? (
+        <div
+          className="visitor-mywines-toast"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="visitor-mywines-toast-text">
+            {t("myWines.restoredSelectionToast")}
           </span>
         </div>
       ) : null}

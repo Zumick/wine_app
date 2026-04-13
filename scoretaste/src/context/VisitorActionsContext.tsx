@@ -8,10 +8,15 @@ import {
   type ReactNode,
 } from "react";
 import {
+  PENDING_SAVED_SELECTION_KEY,
+  SHOW_RESTORED_TOAST_KEY,
+} from "../lib/saveSelectionApi";
+import {
   cycleWineStarLevel,
   loadVisitorActions,
   markWineryVisited,
   pruneVisitorActionsBlob,
+  saveVisitorActions,
   setWineStarLevel,
   toggleWineryVisited,
   wineStarLevel,
@@ -86,6 +91,62 @@ export function VisitorActionsProvider({
     b = pruneVisitorActionsBlob(catalog, b, es);
     setBlob(b);
   }, [eventId, epochDep, catalog]);
+
+  useEffect(() => {
+    if (!catalog || typeof sessionStorage === "undefined") return;
+    const raw = sessionStorage.getItem(PENDING_SAVED_SELECTION_KEY);
+    if (!raw) return;
+    try {
+      const pending = JSON.parse(raw) as {
+        eventId: string;
+        epochId: number | null;
+        wines: Record<string, { liked?: boolean; wantToBuy?: boolean }>;
+      };
+      if (String(pending.eventId) !== String(eventId)) return;
+      const es = catalogEpochScope(catalog);
+      const pe = pending.epochId;
+      const esNum = es === null || es === undefined ? null : Number(es);
+      const peNum = pe === null || pe === undefined ? null : Number(pe);
+      if (esNum !== peNum) {
+        sessionStorage.removeItem(PENDING_SAVED_SELECTION_KEY);
+        return;
+      }
+      const now = new Date().toISOString();
+      const actions: Record<string, VisitorWineActionRecord> = {};
+      for (const [wid, st] of Object.entries(pending.wines ?? {})) {
+        const liked = Boolean(st?.liked);
+        const wantToBuy = Boolean(st?.wantToBuy);
+        if (!liked && !wantToBuy) continue;
+        actions[wid] = { liked, wantToBuy, updatedAt: now };
+      }
+      const b = loadVisitorActions(eventId, es);
+      const visited: Record<string, boolean> = { ...(b.visitedWineries ?? {}) };
+      for (const w of catalog.wines) {
+        const a = actions[w.id];
+        if (a && (a.liked || a.wantToBuy)) {
+          visited[w.wineryId] = true;
+        }
+      }
+      const merged: VisitorActionsBlob = {
+        schemaVersion: 1,
+        eventId,
+        epochScope: es,
+        actions,
+        visitedWineries: visited,
+      };
+      const pruned = pruneVisitorActionsBlob(catalog, merged, es);
+      setBlob(pruned);
+      saveVisitorActions(pruned);
+      sessionStorage.removeItem(PENDING_SAVED_SELECTION_KEY);
+      try {
+        sessionStorage.setItem(SHOW_RESTORED_TOAST_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+    } catch {
+      sessionStorage.removeItem(PENDING_SAVED_SELECTION_KEY);
+    }
+  }, [catalog, eventId]);
 
   const wineryIdByWineId = useMemo(() => {
     const map: Record<string, string> = {};

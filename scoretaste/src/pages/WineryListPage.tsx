@@ -8,7 +8,7 @@ import {
   useWineryBrowseView,
   useWineryListFilter,
 } from "../hooks/useSessionEventCatalog";
-import { hasEventMapImage } from "../lib/eventMapAsset";
+import { useEventMapExists } from "../hooks/useEventMapExists";
 import { catalogErrorTitle } from "../lib/errorCopy";
 import { logVisitorEvent } from "../lib/visitorStorage";
 import { t } from "../i18n";
@@ -41,14 +41,14 @@ export function WineryListPage() {
   const [browseView, setBrowseView] = useWineryBrowseView();
   const { isWineryVisited, toggleWineryVisited } = useVisitorActions();
   const loggedOpenRef = useRef<string | null>(null);
-
-  const hasMap = Boolean(eventId && hasEventMapImage(eventId));
+  const mapExists = useEventMapExists(eventId);
+  const hasMap = mapExists === true;
 
   useEffect(() => {
-    if (!hasMap && browseView === "map") {
+    if (mapExists === false && browseView === "map") {
       setBrowseView("list");
     }
-  }, [hasMap, browseView, setBrowseView]);
+  }, [mapExists, browseView, setBrowseView]);
 
   useEffect(() => {
     if (!eventId) return;

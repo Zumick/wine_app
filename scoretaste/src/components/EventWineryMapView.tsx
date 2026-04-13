@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
-import { resolveMapAssetUrl } from "../lib/eventMapAsset";
+import { guideEventMapUrl } from "../lib/guideAssetsUrls";
 import { t } from "../i18n";
 import type { EventCatalog, MapHotspot } from "../types";
 
@@ -18,7 +18,12 @@ function markerLabel(h: MapHotspot): string {
 
 export function EventWineryMapView({ eventId, catalog }: Props) {
   const navigate = useNavigate();
-  const mapSrc = resolveMapAssetUrl(eventId);
+  const mapSrc = guideEventMapUrl(eventId);
+  const [mapBroken, setMapBroken] = useState(false);
+
+  useEffect(() => {
+    setMapBroken(false);
+  }, [eventId]);
 
   const wineryIds = useMemo(
     () => new Set(catalog.wineries.map((w) => w.id)),
@@ -30,7 +35,7 @@ export function EventWineryMapView({ eventId, catalog }: Props) {
     return raw.filter((h) => wineryIds.has(h.wineryId));
   }, [catalog.mapHotspots, wineryIds]);
 
-  if (!mapSrc) {
+  if (mapBroken) {
     return null;
   }
 
@@ -69,6 +74,7 @@ export function EventWineryMapView({ eventId, catalog }: Props) {
                   alt={t("winery.mapImageAlt")}
                   decoding="async"
                   draggable={false}
+                  onError={() => setMapBroken(true)}
                 />
                 {hotspots.map((h) => (
                   <button

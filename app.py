@@ -18,6 +18,7 @@ from db import get_connection
 import csv
 import io
 import os
+import shutil
 import json
 import secrets
 import time
@@ -203,6 +204,81 @@ SCORETASTE_EVENTS_DIR = os.path.join(
 SCORETASTE_PUBLIC_EVENTS_DIR = os.path.join(
     _BASE_DIR, "scoretaste", "public", "guide", "data", "events"
 )
+
+_GUIDE_MEDIA_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+_GUIDE_LOGO_FALLBACK_FILENAME = "guide_logo.png"
+
+
+def _ensure_scoretaste_assets_dir():
+    os.makedirs(SCORETASTE_ASSETS_DIR, exist_ok=True)
+
+
+def _ensure_default_guide_logo_file():
+    """Zajistí guide_logo.png v SCORETASTE_ASSETS_DIR (kopie z public šablony)."""
+    _ensure_scoretaste_assets_dir()
+    dest = os.path.join(SCORETASTE_ASSETS_DIR, _GUIDE_LOGO_FALLBACK_FILENAME)
+    if os.path.isfile(dest):
+        return
+    candidates = (
+        os.path.join(_BASE_DIR, "scoretaste", "public", "assets", _GUIDE_LOGO_FALLBACK_FILENAME),
+        os.path.join(_BASE_DIR, "scoretaste", "public", "assets", "logo_def.png"),
+    )
+    for src in candidates:
+        if os.path.isfile(src):
+            try:
+                shutil.copyfile(src, dest)
+            except OSError:
+                pass
+            return
+
+
+def _guide_asset_cache_bust_path(path):
+    try:
+        return int(os.path.getmtime(path))
+    except OSError:
+        return int(time.time())
+
+
+def _guide_validate_png_bytes(raw):
+    return isinstance(raw, (bytes, bytearray)) and len(raw) >= 8 and raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def _guide_validate_jpeg_bytes(raw):
+    return isinstance(raw, (bytes, bytearray)) and len(raw) >= 3 and raw[:3] == b"\xff\xd8\xff"
+
+
+def _guide_write_event_logo(event_id, raw):
+    if not raw:
+        return False, "Soubor je prázdný."
+    if len(raw) > _GUIDE_MEDIA_UPLOAD_MAX_BYTES:
+        return False, "Logo je příliš velké (maximum 5 MB)."
+    if not _guide_validate_png_bytes(raw):
+        return False, "Logo musí být platný PNG soubor."
+    _ensure_scoretaste_assets_dir()
+    path = os.path.join(SCORETASTE_ASSETS_DIR, f"logo_{int(event_id)}.png")
+    try:
+        with open(path, "wb") as fp:
+            fp.write(raw)
+    except OSError as exc:
+        return False, f"Uložení loga se nezdařilo: {exc}"
+    return True, "Logo akce bylo uloženo (případně nahrazeno)."
+
+
+def _guide_write_event_map(event_id, raw):
+    if not raw:
+        return False, "Soubor je prázdný."
+    if len(raw) > _GUIDE_MEDIA_UPLOAD_MAX_BYTES:
+        return False, "Mapa je příliš velká (maximum 5 MB)."
+    if not _guide_validate_jpeg_bytes(raw):
+        return False, "Mapa musí být platný JPEG soubor (.jpg)."
+    _ensure_scoretaste_assets_dir()
+    path = os.path.join(SCORETASTE_ASSETS_DIR, f"mapa_{int(event_id)}.jpg")
+    try:
+        with open(path, "wb") as fp:
+            fp.write(raw)
+    except OSError as exc:
+        return False, f"Uložení mapy se nezdařilo: {exc}"
+    return True, "Mapa akce byla uložena (případně nahrazena)."
 
 
 def _scoretaste_deep_link(event_id):
@@ -1399,6 +1475,24 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scoretaste_saved_selection (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
+            event_id INTEGER NOT NULL,
+            epoch_id INTEGER,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (event_id) REFERENCES degustace(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scoretaste_saved_selection_token
+        ON scoretaste_saved_selection(token)
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -2126,6 +2220,7 @@ _HOME_TYP_META = {
     TYP_AKCE_BODOVANA: {
         "page_title": "Správa a vyhodnocení bodovaných degustací",
         "h1": "Správa a vyhodnocení bodovaných degustací",
+        "list_heading": "Seznam degustací",
         "help_inner": """
             <h2>Rychlý průvodce</h2>
             <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data.</p>
@@ -2142,16 +2237,12 @@ _HOME_TYP_META = {
         "nova_btn": "Nová bodovaná degustace",
     },
     TYP_AKCE_PRUVODCE: {
-        "page_title": "Průvodce degustací",
-        "h1": "Průvodce degustací",
-        "help_inner": """
-            <h2>Rychlý průvodce</h2>
-            <p><strong>Nová degustace</strong> — založíte akci zadáním názvu a data (otevřené sklepy, veřejná degustace).</p>
-            <p><strong>Seznam</strong> — otevřete akci kliknutím na řádek. Samostatná aplikace pro průvodce se postupně doplní.</p>
-            <p><strong>Doporučený postup:</strong> vytvořte akci, vyplňte údaje podle pokynů v jednotlivých částech aplikace.</p>
-        """,
+        "page_title": "Seznam akcí",
+        "h1": "Seznam akcí",
+        "help_inner": "",
         "empty_msg": "Zatím není založena žádná akce tohoto typu.",
-        "nova_btn": "Nová degustace průvodce",
+        "nova_btn": "Nová akce",
+        "list_heading": "Seznam akcí",
     },
 }
 
@@ -2167,12 +2258,29 @@ def _html_deg_list_button_inner(d):
     )
 
 
+def _deg_guide_event_meta_line(d):
+    misto_t = _deg_misto_text(d)
+    datum = (d["datum"] or "").strip()
+    if misto_t and datum:
+        return f"{misto_t} · {datum}"
+    if misto_t:
+        return misto_t
+    if datum:
+        return datum
+    return ""
+
+
 def _html_deg_list_section(
     degustace, post_url, empty_msg, include_pruvodce_delete=False
 ):
     if not degustace:
         return f"<p>{escape(empty_msg)}</p>"
-    parts = ['<div class="degustace-grid">']
+    grid_open = (
+        '<div class="degustace-grid degustace-grid--guide">'
+        if include_pruvodce_delete
+        else '<div class="degustace-grid">'
+    )
+    parts = [grid_open]
     for d in degustace:
         inner = _html_deg_list_button_inner(d)
         vyber = f"""
@@ -2183,21 +2291,76 @@ def _html_deg_list_section(
         </form>"""
         if include_pruvodce_delete:
             eid = int(d["id"])
+            _lp = os.path.join(SCORETASTE_ASSETS_DIR, f"logo_{eid}.png")
+            _mp = os.path.join(SCORETASTE_ASSETS_DIR, f"mapa_{eid}.jpg")
+            has_logo = os.path.isfile(_lp)
+            has_map = os.path.isfile(_mp)
+            logo_title = (
+                f"Vlastní logo akce je nahrané (logo_{eid}.png)."
+                if has_logo
+                else "Vlastní logo zatím není — použije se výchozí průvodce."
+            )
+            map_title = (
+                f"Mapa je nahraná (mapa_{eid}.jpg)."
+                if has_map
+                else "Mapa zatím není nahraná."
+            )
+            logo_dot_cls = "deg-dot deg-dot--ok" if has_logo else "deg-dot deg-dot--miss"
+            map_dot_cls = "deg-dot deg-dot--ok" if has_map else "deg-dot deg-dot--miss"
+            logo_src = (
+                url_for("guide_assets", filename=f"logo_{eid}.png")
+                if has_logo
+                else url_for("guide_assets", filename=_GUIDE_LOGO_FALLBACK_FILENAME)
+            )
+            nazev_esc = escape((d["nazev"] or "").strip() or "Bez názvu")
+            meta_line = _deg_guide_event_meta_line(d)
+            meta_block = (
+                f'<span class="deg-tile-meta">{escape(meta_line)}</span>'
+                if meta_line
+                else ""
+            )
+            vyber = f"""
+        <form method="post" action="{escape(post_url)}" class="deg-tile-form">
+            <input type="hidden" name="action" value="vyber">
+            <input type="hidden" name="degustace_id" value="{eid}">
+            <button class="deg-tile-hit" type="submit">
+                <div class="deg-tile-logo-wrap">
+                    <img class="deg-tile-logo" src="{escape(logo_src)}" alt="" loading="lazy" decoding="async">
+                </div>
+                <span class="deg-tile-title">{nazev_esc}</span>
+                {meta_block}
+            </button>
+        </form>"""
             admin_href = url_for("guide_admin_catalog", event_id=eid)
             monitor_href = f"{URL_GUIDE_APP_PREFIX}/e/{eid}/monitor"
             monitor_link = ""
             if _env_truthy("WINEAPP_PILOT_MONITOR", False):
                 monitor_link = (
-                    f'<a class="guide-admin-cat-link" href="{escape(monitor_href)}">'
+                    f'<a class="guide-action-link-secondary" href="{escape(monitor_href)}">'
                     "Pilot monitor</a>"
                 )
             parts.append(
                 f"""
-        <div class="deg-row-guide">
-            <div class="deg-row-main">{vyber}</div>
-            <div class="deg-row-actions">
-                <div class="deg-row-links">
-                    <a class="guide-admin-cat-link" href="{escape(admin_href)}">Správa akce</a>{monitor_link}
+        <article class="guide-event-card">
+            <div class="guide-card-open">
+                {vyber}
+            </div>
+            <div class="guide-card-actions" data-guide-actions>
+                <a class="guide-action-primary" href="{escape(admin_href)}">Správa akce</a>
+                {monitor_link}
+                <div class="deg-row-uploads">
+                    <form method="post" action="{escape(post_url)}" enctype="multipart/form-data" class="deg-upload-form">
+                        <input type="hidden" name="action" value="upload_event_logo">
+                        <input type="hidden" name="degustace_id" value="{eid}">
+                        <input type="file" name="logo_file" id="guide-up-logo-{eid}" accept="image/png,.png" class="deg-file-input" onchange="if(this.files.length)this.form.submit()">
+                        <label for="guide-up-logo-{eid}" class="btn-upload" title="{escape(logo_title)}" aria-label="{escape(logo_title)}">Nahrát logo <span class="{logo_dot_cls}" aria-hidden="true">●</span></label>
+                    </form>
+                    <form method="post" action="{escape(post_url)}" enctype="multipart/form-data" class="deg-upload-form">
+                        <input type="hidden" name="action" value="upload_event_map">
+                        <input type="hidden" name="degustace_id" value="{eid}">
+                        <input type="file" name="map_file" id="guide-up-map-{eid}" accept="image/jpeg,.jpg,.jpeg" class="deg-file-input" onchange="if(this.files.length)this.form.submit()">
+                        <label for="guide-up-map-{eid}" class="btn-upload" title="{escape(map_title)}" aria-label="{escape(map_title)}">Nahrát mapu <span class="{map_dot_cls}" aria-hidden="true">●</span></label>
+                    </form>
                 </div>
                 <div class="deg-row-buttons">
                     <form method="post" action="{escape(post_url)}" class="deg-del-form" onsubmit="return confirm('Opravdu resetovat epochu sběru pro tuto akci?');">
@@ -2208,11 +2371,11 @@ def _html_deg_list_section(
                     <form method="post" action="{escape(post_url)}" class="deg-del-form">
                         <input type="hidden" name="action" value="smazat">
                         <input type="hidden" name="degustace_id" value="{eid}">
-                        <button type="submit" class="btn-danger-soft">Smazat</button>
+                        <button type="submit" class="btn-danger-soft">Smazat akci</button>
                     </form>
                 </div>
             </div>
-        </div>"""
+        </article>"""
             )
         else:
             parts.append(vyber)
@@ -2276,6 +2439,10 @@ def _html_shared_home_css():
             }
             .home-title-row span { font-size: 1.5rem; font-weight: bold; }
             .score-sub { margin: 0 0 18px 0; font-size: 1.05rem; color: #444; }
+            .home-flash-wrap { margin: 0 0 14px 0; }
+            .home-flash { margin: 6px 0; padding: 10px 12px; border-radius: 6px; font-size: 14px; }
+            .home-flash-success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+            .home-flash-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
             .deg-block-head {
                 display: flex;
                 justify-content: space-between;
@@ -2296,7 +2463,7 @@ def _html_shared_home_css():
                 margin: 4px 0;
                 font-size: 14px;
             }
-            button:not(.btn-new-deg):not(.dlg-cancel):not(.btn-epoch-reset):not(.btn-danger-soft) {
+            button:not(.btn-new-deg):not(.dlg-cancel):not(.btn-epoch-reset):not(.btn-danger-soft):not(.deg-tile-hit) {
                 padding: 10px 10px;
                 margin: 4px 0;
                 font-size: 14px;
@@ -2308,45 +2475,182 @@ def _html_shared_home_css():
                 gap: 10px 12px;
             }
             @media (max-width: 900px) {
-                .degustace-grid { grid-template-columns: repeat(2, 1fr); }
+                .degustace-grid:not(.degustace-grid--guide) { grid-template-columns: repeat(2, 1fr); }
             }
             @media (max-width: 520px) {
-                .degustace-grid { grid-template-columns: 1fr; }
+                .degustace-grid:not(.degustace-grid--guide) { grid-template-columns: 1fr; }
             }
-            .degustace-grid form { margin: 0; min-width: 0; }
-            .deg-row-guide {
+            .degustace-grid--guide {
                 display: grid;
-                grid-template-columns: minmax(0, 1fr) auto;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
                 gap: 12px;
                 align-items: stretch;
-                min-width: 0;
-                padding: 10px 12px;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background: #fafafa;
             }
-            .deg-row-main { min-width: 0; }
-            .deg-row-main form { margin: 0; }
-            .deg-row-actions {
+            @media (max-width: 1200px) {
+                .degustace-grid--guide { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            }
+            @media (max-width: 900px) {
+                .degustace-grid--guide { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            }
+            @media (max-width: 560px) {
+                .degustace-grid--guide { grid-template-columns: 1fr; }
+            }
+            .degustace-grid form { margin: 0; min-width: 0; }
+            .guide-event-card {
                 display: flex;
                 flex-direction: column;
-                gap: 8px;
-                min-width: min(200px, 100%);
+                min-width: 0;
+                height: 100%;
+                box-sizing: border-box;
+                padding: 10px 10px 11px;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                background: #fff;
+                box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+            }
+            .guide-card-open {
+                flex: 0 0 auto;
+                min-width: 0;
+            }
+            .guide-card-actions {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px solid #eef2f7;
+                min-width: 0;
+            }
+            .deg-tile-form { margin: 0; }
+            .deg-tile-hit {
+                width: 100%;
+                margin: 0;
+                padding: 6px 6px 0;
+                box-sizing: border-box;
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                text-align: left;
+                cursor: pointer;
+                border: none;
+                background: #f8fafc;
+                font: inherit;
+                color: inherit;
+                border-radius: 8px;
+                border: 1px solid #e5e7eb;
+            }
+            .deg-tile-hit:hover { background: #f1f5f9; }
+            .deg-tile-hit:focus-visible {
+                outline: 2px solid #2563eb;
+                outline-offset: 2px;
+            }
+            .deg-tile-logo-wrap {
+                flex: 0 0 auto;
+                height: 88px;
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #fff;
+                border-radius: 6px;
+                border: 1px solid #e5e7eb;
+            }
+            .deg-tile-logo {
+                max-width: 100%;
+                max-height: 88px;
+                width: auto;
+                height: auto;
+                object-fit: contain;
+            }
+            .deg-tile-title {
+                margin: 8px 4px 0 4px;
+                font-size: 1.05rem;
+                font-weight: 700;
+                line-height: 1.25;
+                color: #0f172a;
+            }
+            .deg-tile-meta {
+                margin: 4px 4px 8px 4px;
+                font-size: 12px;
+                color: #64748b;
+                line-height: 1.35;
+            }
+            .guide-action-primary {
+                display: block;
+                text-align: center;
+                padding: 8px 10px;
+                font-size: 13px;
+                font-weight: 700;
+                color: #fff;
+                background: #2563eb;
+                border: 1px solid #1d4ed8;
+                border-radius: 7px;
+                text-decoration: none;
+                line-height: 1.25;
+            }
+            .guide-action-primary:hover { background: #1d4ed8; }
+            .guide-action-link-secondary {
+                display: block;
+                text-align: center;
+                font-size: 11px;
+                color: #475569;
+                text-decoration: none;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                padding: 6px 8px;
+                background: #f8fafc;
+            }
+            .guide-action-link-secondary:hover { background: #f1f5f9; }
+            .deg-row-uploads {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
                 align-items: stretch;
             }
-            .deg-row-links {
-                display: flex;
-                gap: 8px;
-                justify-content: flex-end;
-                flex-wrap: wrap;
+            .deg-upload-form { margin: 0; display: block; width: 100%; }
+            .deg-file-input {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                padding: 0;
+                margin: -1px;
+                overflow: hidden;
+                clip: rect(0, 0, 0, 0);
+                white-space: nowrap;
+                border: 0;
             }
+            .btn-upload {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 4px;
+                cursor: pointer;
+                font-size: 11px;
+                padding: 6px 8px;
+                border-radius: 6px;
+                border: 1px solid #cbd5e1;
+                background: #fff;
+                color: #334155;
+                line-height: 1.2;
+                user-select: none;
+                width: 100%;
+                box-sizing: border-box;
+            }
+            .btn-upload:hover { background: #f8fafc; border-color: #94a3b8; }
+            .deg-dot { font-size: 10px; line-height: 1; }
+            .deg-dot--ok { color: #15803d; }
+            .deg-dot--miss { color: #cbd5e1; }
             .deg-row-buttons {
                 display: flex;
-                gap: 8px;
-                justify-content: flex-end;
-                flex-wrap: wrap;
+                flex-direction: column;
+                gap: 6px;
+                align-items: stretch;
+                margin-top: 2px;
+                padding-top: 8px;
+                border-top: 1px solid #e5e7eb;
             }
-            .deg-del-form { margin: 0; }
+            .deg-del-form { margin: 0; width: 100%; }
+            .deg-del-form button { width: 100%; box-sizing: border-box; }
             .guide-admin-cat-link {
                 font-size: 12px;
                 color: #334155;
@@ -2365,12 +2669,12 @@ def _html_shared_home_css():
             .btn-epoch-reset,
             .btn-danger-soft {
                 margin: 0;
-                padding: 8px 10px;
-                font-size: 12px;
+                padding: 6px 8px;
+                font-size: 11px;
                 line-height: 1.2;
                 cursor: pointer;
                 border-radius: 6px;
-                white-space: nowrap;
+                white-space: normal;
             }
             .btn-epoch-reset {
                 background: #fff7ed;
@@ -2381,20 +2685,6 @@ def _html_shared_home_css():
                 background: #fee2e2;
                 border: 1px solid #fca5a5;
                 color: #991b1b;
-            }
-            @media (max-width: 760px) {
-                .deg-row-guide {
-                    grid-template-columns: 1fr;
-                }
-                .deg-row-actions {
-                    min-width: 0;
-                    border-top: 1px solid #e5e7eb;
-                    padding-top: 8px;
-                }
-                .deg-row-links,
-                .deg-row-buttons {
-                    justify-content: flex-start;
-                }
             }
             .menu-button {
                 width: 100%;
@@ -2530,10 +2820,11 @@ def _html_home_dashboard(deg_bod, deg_pruv, logo_url):
 
 def _html_home_typ_page(typ_akce, degustace, logo_url):
     m = _HOME_TYP_META.get(typ_akce) or _HOME_TYP_META[TYP_AKCE_BODOVANA]
-    help_inner = m["help_inner"]
+    help_inner = m.get("help_inner") or ""
     empty_msg = m["empty_msg"]
     page_title = escape(m["page_title"])
     h1 = escape(m["h1"])
+    list_heading = escape(m.get("list_heading") or "Seznam degustací")
     post_url = URL_SCORE if typ_akce == TYP_AKCE_BODOVANA else URL_GUIDE
     dlg_id = "dlg-score" if typ_akce == TYP_AKCE_BODOVANA else "dlg-guide"
     css = _html_shared_home_css()
@@ -2550,6 +2841,22 @@ def _html_home_typ_page(typ_akce, degustace, logo_url):
         empty_msg,
         include_pruvodce_delete=(typ_akce == TYP_AKCE_PRUVODCE),
     )
+    flash_html = ""
+    for cat, msg in get_flashed_messages(with_categories=True):
+        flash_html += (
+            f'<p class="home-flash home-flash-{escape(cat)}">{escape(msg)}</p>\n'
+        )
+    flash_block = (
+        f'<div class="home-flash-wrap" role="status" aria-live="polite">{flash_html}</div>'
+        if flash_html
+        else ""
+    )
+    help_block = ""
+    if (help_inner or "").strip():
+        help_block = f"""    <div class="box-help" role="region" aria-label="Nápověda k hlavní stránce">
+        {help_inner}
+    </div>
+"""
 
     return f"""<!DOCTYPE html>
 <html lang="cs">
@@ -2566,19 +2873,15 @@ def _html_home_typ_page(typ_akce, degustace, logo_url):
         </a>
         <span>{h1}</span>
     </h1>
-
+{flash_block}
     <div class="box deg-block">
         <div class="deg-block-head">
-            <h2>Seznam degustací</h2>
+            <h2>{list_heading}</h2>
             {dlg}
         </div>
         {list_html}
     </div>
-
-    <div class="box-help" role="region" aria-label="Nápověda k hlavní stránce">
-        {help_inner}
-    </div>
-</body>
+{help_block}</body>
 </html>"""
 
 
@@ -2633,6 +2936,72 @@ def _handle_home_typ(typ_akce_route):
             conn.commit()
             conn.close()
             _delete_scoretaste_event_json_files(deg_id)
+            return redirect(URL_GUIDE)
+        if action == "upload_event_logo":
+            if ((request.path or "").rstrip("/") or "/") != URL_GUIDE:
+                conn.close()
+                abort(400)
+            raw_id = request.form.get("degustace_id")
+            if not raw_id or not str(raw_id).isdigit():
+                conn.close()
+                abort(400)
+            deg_id = int(raw_id)
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            if not deg_row:
+                conn.close()
+                abort(404)
+            if _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+                conn.close()
+                flash("Tato akce není typu průvodce.", "error")
+                return redirect(URL_GUIDE)
+            conn.close()
+            f = request.files.get("logo_file")
+            if not f or not (getattr(f, "filename", None) or "").strip():
+                flash("Vyberte PNG soubor s logem.", "error")
+                return redirect(URL_GUIDE)
+            ctype = (getattr(f, "mimetype", None) or getattr(f, "content_type", None) or "").lower()
+            if ctype and "png" not in ctype:
+                flash("Logo musí být PNG (image/png).", "error")
+                return redirect(URL_GUIDE)
+            raw = f.read()
+            ok, msg = _guide_write_event_logo(deg_id, raw)
+            flash(msg, "success" if ok else "error")
+            return redirect(URL_GUIDE)
+        if action == "upload_event_map":
+            if ((request.path or "").rstrip("/") or "/") != URL_GUIDE:
+                conn.close()
+                abort(400)
+            raw_id = request.form.get("degustace_id")
+            if not raw_id or not str(raw_id).isdigit():
+                conn.close()
+                abort(400)
+            deg_id = int(raw_id)
+            deg_row = conn.execute(
+                "SELECT typ_akce FROM degustace WHERE id = ?",
+                (deg_id,),
+            ).fetchone()
+            if not deg_row:
+                conn.close()
+                abort(404)
+            if _deg_row_typ_akce(deg_row) != TYP_AKCE_PRUVODCE:
+                conn.close()
+                flash("Tato akce není typu průvodce.", "error")
+                return redirect(URL_GUIDE)
+            conn.close()
+            f = request.files.get("map_file")
+            if not f or not (getattr(f, "filename", None) or "").strip():
+                flash("Vyberte JPEG soubor s mapou.", "error")
+                return redirect(URL_GUIDE)
+            ctype = (getattr(f, "mimetype", None) or getattr(f, "content_type", None) or "").lower()
+            if ctype and "jpeg" not in ctype and "jpg" not in ctype:
+                flash("Mapa musí být JPEG (image/jpeg).", "error")
+                return redirect(URL_GUIDE)
+            raw = f.read()
+            ok, msg = _guide_write_event_map(deg_id, raw)
+            flash(msg, "success" if ok else "error")
             return redirect(URL_GUIDE)
         if action == "nova_degustace":
             pocet_komisi = 3
@@ -3434,12 +3803,13 @@ def _html_guide_admin_page(
         + quote(visitor_abs, safe="")
     )
     eid_int = int(event_id)
+    _ensure_default_guide_logo_file()
     _logo_primary = f"logo_{eid_int}.png"
     _logo_primary_path = os.path.join(SCORETASTE_ASSETS_DIR, _logo_primary)
     if os.path.isfile(_logo_primary_path):
         logo_url = url_for("guide_assets", filename=_logo_primary)
     else:
-        logo_url = url_for("guide_assets", filename="logo_def.png")
+        logo_url = url_for("guide_assets", filename=_GUIDE_LOGO_FALLBACK_FILENAME)
     prev_h = escape(preview_href)
     admin_base = url_for("guide_admin_catalog", event_id=event_id)
     flash_html = ""
@@ -4584,8 +4954,8 @@ def guide_admin_catalog(event_id):
 
 @app.route("/guide/assets/<path:filename>")
 def guide_assets(filename):
-    if not os.path.isdir(SCORETASTE_ASSETS_DIR):
-        abort(404)
+    _ensure_scoretaste_assets_dir()
+    _ensure_default_guide_logo_file()
     return send_from_directory(SCORETASTE_ASSETS_DIR, filename)
 
 
@@ -4862,6 +5232,135 @@ def guide_visitor_event(event_id):
         )
         conn.commit()
         return jsonify(ok=True)
+    finally:
+        conn.close()
+
+
+_ALPHANUM_SAVE_TOKEN = "23456789abcdefghjkmnpqrstuvwxyz"
+
+
+def _new_saved_selection_token(conn):
+    for _ in range(16):
+        t = "".join(secrets.choice(_ALPHANUM_SAVE_TOKEN) for _ in range(8))
+        if not conn.execute(
+            "SELECT 1 FROM scoretaste_saved_selection WHERE token = ?", (t,)
+        ).fetchone():
+            return t
+    return secrets.token_hex(4)
+
+
+@app.route("/guide/api/save-selection", methods=["POST"])
+def guide_api_save_selection():
+    data = request.get_json(silent=True) or {}
+    try:
+        eid = int(data.get("event_id", data.get("eventId")))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="event_id"), 400
+    wines_in = data.get("wines")
+    if not isinstance(wines_in, dict):
+        return jsonify(ok=False, error="wines"), 400
+    epoch_raw = data.get("epoch_id", data.get("epochId"))
+    epoch_id_payload = None
+    if epoch_raw is not None and epoch_raw != "":
+        try:
+            epoch_id_payload = int(epoch_raw)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="epoch_id"), 400
+
+    conn = get_connection()
+    try:
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            abort(404)
+
+        cleaned = {}
+        for wid_str, rec in wines_in.items():
+            ws = str(wid_str).strip()
+            if not ws.isdigit():
+                continue
+            wid = int(ws)
+            row = conn.execute(
+                """
+                SELECT w.id FROM scoretaste_wines w
+                JOIN scoretaste_wineries y ON w.winery_id = y.id
+                WHERE y.event_id = ? AND w.id = ?
+                """,
+                (eid, wid),
+            ).fetchone()
+            if not row:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            liked = bool(rec.get("liked"))
+            want = bool(rec.get("wantToBuy"))
+            if not liked and not want:
+                continue
+            cleaned[str(wid)] = {"liked": liked, "wantToBuy": want}
+
+        if not cleaned:
+            return jsonify(ok=False, error="empty"), 400
+
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        payload = {"epoch_id": epoch_id_payload, "wines": cleaned}
+        token = _new_saved_selection_token(conn)
+        conn.execute(
+            """
+            INSERT INTO scoretaste_saved_selection
+            (token, event_id, epoch_id, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                token,
+                eid,
+                epoch_id_payload,
+                json.dumps(payload, ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.commit()
+        share_path = f"/guide/s/{token}"
+        share_url = absolute_public_url(share_path)
+        return jsonify(ok=True, token=token, share_url=share_url)
+    finally:
+        conn.close()
+
+
+@app.route("/guide/api/saved-selection/<token>")
+def guide_api_saved_selection(token):
+    tok = (token or "").strip()
+    if len(tok) < 4 or len(tok) > 64:
+        return jsonify(ok=False, error="token"), 400
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT event_id, epoch_id, payload_json
+            FROM scoretaste_saved_selection
+            WHERE token = ?
+            """,
+            (tok,),
+        ).fetchone()
+        if not row:
+            return jsonify(ok=False, error="not_found"), 404
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            return jsonify(ok=False, error="corrupt"), 500
+        wines = payload.get("wines") if isinstance(payload, dict) else None
+        if not isinstance(wines, dict):
+            wines = {}
+        eid = int(row["event_id"])
+        deg = conn.execute("SELECT * FROM degustace WHERE id = ?", (eid,)).fetchone()
+        if not deg or _deg_row_typ_akce(deg) != TYP_AKCE_PRUVODCE:
+            return jsonify(ok=False, error="gone"), 410
+        ep = row["epoch_id"]
+        epoch_out = int(ep) if ep is not None else None
+        return jsonify(
+            ok=True,
+            event_id=str(eid),
+            epoch_id=epoch_out,
+            wines=wines,
+        )
     finally:
         conn.close()
 
@@ -5200,7 +5699,8 @@ def guide_contributor_catalog(event_id, winery_id):
 @app.route("/guide/e/<event_id>/my")
 @app.route("/guide/e/<event_id>/map-editor")
 @app.route("/guide/e/<event_id>/monitor")
-def guide_scoretaste_app(event_id, winery_id=None):
+@app.route("/guide/s/<token>")
+def guide_scoretaste_app(event_id=None, winery_id=None, token=None):
     return _scoretaste_index()
 
 

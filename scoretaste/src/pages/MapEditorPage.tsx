@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { fetchEventCatalog } from "../lib/eventLoader";
-import { resolveMapAssetUrl } from "../lib/eventMapAsset";
+import { guideEventMapUrl } from "../lib/guideAssetsUrls";
 import type { MapHotspot, Winery } from "../types";
 
 function sortWineriesForEditor(ws: Winery[]): Winery[] {
@@ -40,7 +40,7 @@ export function MapEditorPage() {
   const [mapDisplaySize, setMapDisplaySize] = useState({ w: 0, h: 0 });
   const mapImgRef = useRef<HTMLImageElement | null>(null);
 
-  const mapSrc = eventId ? resolveMapAssetUrl(eventId) : undefined;
+  const mapSrc = eventId ? guideEventMapUrl(eventId) : undefined;
 
   const reload = useCallback(() => {
     if (!eventId) return;
@@ -66,6 +66,10 @@ export function MapEditorPage() {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  useEffect(() => {
+    setMapOk(true);
+  }, [eventId, mapSrc]);
 
   useEffect(() => {
     const el = mapImgRef.current;
@@ -193,7 +197,7 @@ export function MapEditorPage() {
     );
   }
 
-  const mapMissing = !mapSrc || !mapOk;
+  const mapMissing = !mapSrc ? true : !mapOk;
   const hotspotCount = Object.keys(hotspotsByWinery).length;
 
   return (

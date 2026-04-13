@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useMatch } from "react-router-dom";
+import { GuidePwaBanner } from "../components/GuidePwaBanner";
+import { guideEventEntryUrl } from "../lib/guideUrls";
 import type { EventCatalog } from "../types";
 import { t } from "../i18n";
 import type { VisitorSessionOutletContext } from "./visitorSessionContext";
 import madeByLogo from "../assets/ScorTaste_cz_logo_info.png";
+import {
+  guideDefaultGuideLogoUrl,
+  guideEventLogoPrimaryUrl,
+} from "../lib/guideAssetsUrls";
 
 type Props = {
   eventId: string;
@@ -12,10 +18,10 @@ type Props = {
 };
 
 function visitorLogoUrls(eventId: string) {
-  const base = import.meta.env.BASE_URL;
-  const primary = `${base}assets/logo_${eventId}.png`;
-  const fallback = `${base}assets/logo_def.png`;
-  return { primary, fallback };
+  return {
+    primary: guideEventLogoPrimaryUrl(eventId),
+    fallback: guideDefaultGuideLogoUrl(),
+  };
 }
 
 function VisitorEventLogo({ eventId }: { eventId: string }) {
@@ -43,6 +49,7 @@ function VisitorEventLogo({ eventId }: { eventId: string }) {
 
 export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
+  const [returnOpen, setReturnOpen] = useState(false);
   const [infoHighlighted, setInfoHighlighted] = useState(false);
   const infoHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { wineryFilter, setWineryFilter, wineryBrowseView } = outletContext;
@@ -52,6 +59,14 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
   });
   const showFilter = Boolean(listMatch) && wineryBrowseView === "list";
   const eventName = catalog.event.name.trim() || t("guide.title");
+  const eventEntryUrl = guideEventEntryUrl(eventId);
+  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(eventEntryUrl)}`;
+  const addToHomeText =
+    typeof navigator !== "undefined" && /iPhone|iPad|iPod/i.test(navigator.userAgent)
+      ? "Přidejte si průvodce na plochu → Sdílet → Přidat na plochu"
+      : typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)
+        ? "Přidejte si průvodce na plochu → menu ⋮ → Přidat na plochu"
+        : "V menu prohlížeče zvolte „Přidat na plochu“ / „Instalovat aplikaci“.";
   const showPilotMonitor =
     import.meta.env.VITE_PILOT_MONITOR === "true" ||
     import.meta.env.VITE_PILOT_MONITOR === "1";
@@ -106,16 +121,29 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
             <VisitorEventLogo eventId={eventId} />
             <span className="visitor-event-title">{eventName}</span>
           </div>
-          <button
-            type="button"
-            className={`visitor-info-btn${infoHighlighted ? " visitor-info-btn-highlight" : ""}`}
-            onClick={() => setInfoOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={infoOpen}
-            aria-label={t("visitor.infoAria")}
-          >
-            ⓘ
-          </button>
+          <div className="visitor-header-actions">
+            <button
+              type="button"
+              className="visitor-return-hint-btn"
+              onClick={() => setReturnOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={returnOpen}
+              aria-label={t("visitor.returnHintAria")}
+              title={t("visitor.returnHintAria")}
+            >
+              🔗
+            </button>
+            <button
+              type="button"
+              className={`visitor-info-btn${infoHighlighted ? " visitor-info-btn-highlight" : ""}`}
+              onClick={() => setInfoOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={infoOpen}
+              aria-label={t("visitor.infoAria")}
+            >
+              ⓘ
+            </button>
+          </div>
         </div>
 
         <nav className="visitor-nav" aria-label={t("visitor.navAria")}>
@@ -215,12 +243,12 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
                     označení top vína - kupuju
                   </li>
                 </ul>
-                <ul className="visitor-info-list" aria-label="Sdílení seznamu vín">
+                <ul className="visitor-info-list" aria-label="Sdílení výběru">
                   <li>
                     <span className="visitor-info-symbol" aria-hidden={true}>
                       ↗
                     </span>
-                    Seznam vín můžete sdílet.
+                    V Moje vína můžete uložit a sdílet výběr — dostanete odkaz pro návrat bez QR.
                   </li>
                 </ul>
                 <p className="visitor-info-p">V Moje vína je seznam označených vzorků</p>
@@ -270,9 +298,67 @@ export function VisitorSessionChrome({ eventId, catalog, outletContext }: Props)
         </div>
       ) : null}
 
+      {returnOpen ? (
+        <div
+          className="visitor-modal-backdrop"
+          role="presentation"
+          onClick={() => setReturnOpen(false)}
+        >
+          <div
+            className="visitor-modal visitor-return-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="visitor-return-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="visitor-modal-head">
+              <h2 id="visitor-return-title" className="visitor-modal-title">
+                {t("visitor.returnModalTitle")}
+              </h2>
+              <button
+                type="button"
+                className="visitor-modal-close"
+                onClick={() => setReturnOpen(false)}
+                aria-label={t("visitor.modalCloseAria")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="visitor-modal-body">
+              <p className="visitor-return-label">{t("visitor.returnUrlLabel")}</p>
+              <div className="visitor-return-url-row">
+                <code className="visitor-return-url">{eventEntryUrl}</code>
+                <button
+                  type="button"
+                  className="visitor-return-copy"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(eventEntryUrl);
+                  }}
+                >
+                  {t("visitor.copyLink")}
+                </button>
+              </div>
+              <p className="visitor-return-p">{addToHomeText}</p>
+              <div className="visitor-return-qr-wrap">
+                <img src={qrSrc} alt="" width={220} height={220} loading="lazy" />
+              </div>
+            </div>
+            <button
+              type="button"
+              className="visitor-modal-ok"
+              onClick={() => setReturnOpen(false)}
+            >
+              {t("visitor.modalOk")}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="visitor-body">
         <Outlet context={outletContext} />
       </div>
+
+      <GuidePwaBanner eventId={eventId} />
 
       {showPilotMonitor ? (
         <div className="visitor-pilot-foot">
