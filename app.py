@@ -198,6 +198,10 @@ _TYP_AKCE_PRUVODCE_DB_VALUES = (TYP_AKCE_PRUVODCE, "průvodce")
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCORETASTE_DIST_DIR = os.path.join(_BASE_DIR, "scoretaste", "dist")
 SCORETASTE_ASSETS_DIR = os.path.join(SCORETASTE_DIST_DIR, "assets")
+# Nahraná loga a mapy akcí. Bez GUIDE_MEDIA_DIR se ukládají do build výstupu
+# (scoretaste/dist/assets), který každý deploy přepíše. Na VPS (Coolify) nastavit
+# GUIDE_MEDIA_DIR na persistentní volume, např. /data/guide-media.
+SCORETASTE_MEDIA_DIR = (os.environ.get("GUIDE_MEDIA_DIR") or "").strip() or SCORETASTE_ASSETS_DIR
 SCORETASTE_EVENTS_DIR = os.path.join(
     SCORETASTE_DIST_DIR, "guide", "data", "events"
 )
@@ -210,13 +214,22 @@ _GUIDE_LOGO_FALLBACK_FILENAME = "guide_logo.png"
 
 
 def _ensure_scoretaste_assets_dir():
-    os.makedirs(SCORETASTE_ASSETS_DIR, exist_ok=True)
+    os.makedirs(SCORETASTE_MEDIA_DIR, exist_ok=True)
+
+
+def _guide_media_file(filename):
+    """Cesta k nahranému souboru akce: nejdřív GUIDE_MEDIA_DIR, pak build assets (commitnuté soubory)."""
+    for base in (SCORETASTE_MEDIA_DIR, SCORETASTE_ASSETS_DIR):
+        path = os.path.join(base, filename)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def _ensure_default_guide_logo_file():
-    """Zajistí guide_logo.png v SCORETASTE_ASSETS_DIR (kopie z public šablony)."""
+    """Zajistí guide_logo.png v SCORETASTE_MEDIA_DIR (kopie z public šablony)."""
     _ensure_scoretaste_assets_dir()
-    dest = os.path.join(SCORETASTE_ASSETS_DIR, _GUIDE_LOGO_FALLBACK_FILENAME)
+    dest = os.path.join(SCORETASTE_MEDIA_DIR, _GUIDE_LOGO_FALLBACK_FILENAME)
     if os.path.isfile(dest):
         return
     candidates = (
@@ -255,7 +268,7 @@ def _guide_write_event_logo(event_id, raw):
     if not _guide_validate_png_bytes(raw):
         return False, "Logo musí být platný PNG soubor."
     _ensure_scoretaste_assets_dir()
-    path = os.path.join(SCORETASTE_ASSETS_DIR, f"logo_{int(event_id)}.png")
+    path = os.path.join(SCORETASTE_MEDIA_DIR, f"logo_{int(event_id)}.png")
     try:
         with open(path, "wb") as fp:
             fp.write(raw)
@@ -272,7 +285,7 @@ def _guide_write_event_map(event_id, raw):
     if not _guide_validate_jpeg_bytes(raw):
         return False, "Mapa musí být platný JPEG soubor (.jpg)."
     _ensure_scoretaste_assets_dir()
-    path = os.path.join(SCORETASTE_ASSETS_DIR, f"mapa_{int(event_id)}.jpg")
+    path = os.path.join(SCORETASTE_MEDIA_DIR, f"mapa_{int(event_id)}.jpg")
     try:
         with open(path, "wb") as fp:
             fp.write(raw)
@@ -2291,10 +2304,8 @@ def _html_deg_list_section(
         </form>"""
         if include_pruvodce_delete:
             eid = int(d["id"])
-            _lp = os.path.join(SCORETASTE_ASSETS_DIR, f"logo_{eid}.png")
-            _mp = os.path.join(SCORETASTE_ASSETS_DIR, f"mapa_{eid}.jpg")
-            has_logo = os.path.isfile(_lp)
-            has_map = os.path.isfile(_mp)
+            has_logo = _guide_media_file(f"logo_{eid}.png") is not None
+            has_map = _guide_media_file(f"mapa_{eid}.jpg") is not None
             logo_title = (
                 f"Vlastní logo akce je nahrané (logo_{eid}.png)."
                 if has_logo
@@ -3805,8 +3816,7 @@ def _html_guide_admin_page(
     eid_int = int(event_id)
     _ensure_default_guide_logo_file()
     _logo_primary = f"logo_{eid_int}.png"
-    _logo_primary_path = os.path.join(SCORETASTE_ASSETS_DIR, _logo_primary)
-    if os.path.isfile(_logo_primary_path):
+    if _guide_media_file(_logo_primary) is not None:
         logo_url = url_for("guide_assets", filename=_logo_primary)
     else:
         logo_url = url_for("guide_assets", filename=_GUIDE_LOGO_FALLBACK_FILENAME)
@@ -4956,6 +4966,8 @@ def guide_admin_catalog(event_id):
 def guide_assets(filename):
     _ensure_scoretaste_assets_dir()
     _ensure_default_guide_logo_file()
+    if os.path.isfile(os.path.join(SCORETASTE_MEDIA_DIR, filename)):
+        return send_from_directory(SCORETASTE_MEDIA_DIR, filename)
     return send_from_directory(SCORETASTE_ASSETS_DIR, filename)
 
 
